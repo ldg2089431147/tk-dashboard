@@ -1,13 +1,11 @@
 """TikTok Shop + 飞书寄样表 管理后台"""
 import os
 import json
-import csv
-import io
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, render_template_string, jsonify, request, session
+from flask import Flask, render_template_string, jsonify, request
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,10 +15,53 @@ app.secret_key = os.urandom(24).hex()
 
 # ── 飞书模块 ──
 sys.path.insert(0, os.path.dirname(__file__))
-from feishu.config import load_config as load_feishu_config
+from feishu.config import load_config as load_feishu_config, FeishuConfig
 from feishu.client import FeishuClient
 from feishu.bitable import BitableService
 from feishu.exceptions import FeishuError
+
+# ── 配置存储 ──
+CONFIG_FILE = Path(__file__).parent / "feishu_config.json"
+
+
+def load_saved_config() -> dict:
+    """从文件读取保存的飞书配置"""
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_config_to_file(data: dict):
+    """保存飞书配置到文件"""
+    CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_feishu_config():
+    """获取飞书配置：优先从文件读取，其次环境变量"""
+    saved = load_saved_config()
+    return {
+        "app_id": saved.get("app_id") or os.getenv("FEISHU_APP_ID", ""),
+        "app_secret": saved.get("app_secret") or os.getenv("FEISHU_APP_SECRET", ""),
+        "app_token": saved.get("app_token") or os.getenv("FEISHU_APP_TOKEN", ""),
+        "table_id": saved.get("table_id") or os.getenv("FEISHU_TABLE_ID", "tblRWlmlvudYAruS"),
+    }
+
+
+def get_feishu_service():
+    """获取飞书服务实例"""
+    cfg = get_feishu_config()
+    if not cfg["app_id"] or not cfg["app_secret"]:
+        return None
+    try:
+        feishu_cfg = FeishuConfig(app_id=cfg["app_id"], app_secret=cfg["app_secret"])
+        client = FeishuClient(feishu_cfg)
+        return BitableService(client)
+    except Exception:
+        return None
+
 
 # ── HTML 模板 ──
 HTML = r"""
@@ -65,7 +106,6 @@ HTML = r"""
         .main-content { padding: 30px; }
         .page-title { margin-bottom: 25px; }
         .page-title h2 { font-weight: 600; }
-        .badge-status { font-size: 0.8rem; padding: 4px 10px; }
         .upload-zone {
             border: 2px dashed #ccc;
             border-radius: 12px;
@@ -98,9 +138,13 @@ HTML = r"""
             margin-bottom: 20px;
         }
         .image-box img { max-width: 100%; height: auto; border-radius: 8px; }
+        .config-form label { font-weight: 500; }
+        .config-form .form-text { font-size: 0.8rem; }
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
     </style>
 </head>
 <body>
+    <div class="toast-container" id="toastContainer"></div>
     <div class="container-fluid">
         <div class="row">
             <!-- 侧边栏 -->
@@ -116,28 +160,34 @@ HTML = r"""
             </div>
 
             <!-- 主内容 -->
-            <div class="col-md-10 main-content" id="mainContent">
-                <!-- 由 JS 动态加载 -->
-            </div>
+            <div class="col-md-10 main-content" id="mainContent"></div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        let currentPage = 'dashboard';
+        function showToast(msg, type) {
+            const container = document.getElementById('toastContainer');
+            const colors = { success: '#198754', danger: '#dc3545', warning: '#ffc107', info: '#0dcaf0' };
+            const bg = colors[type] || colors.info;
+            const html = `<div style="background:${bg};color:#fff;padding:12px 20px;border-radius:8px;margin-bottom:8px;box-shadow:0 2px 8px rgba(0,0,0,0.15);min-width:250px">${msg}</div>`;
+            const el = document.createElement('div');
+            el.innerHTML = html;
+            container.appendChild(el.firstElementChild);
+            setTimeout(() => { if (container.firstChild) container.removeChild(container.firstChild); }, 3000);
+        }
 
+        let currentPage = 'dashboard';
         function loadPage(page) {
             currentPage = page;
             const navLinks = document.querySelectorAll('.nav-link');
             navLinks.forEach(l => l.classList.remove('active'));
             if (event && event.target) event.target.classList.add('active');
             else {
-                const links = document.querySelectorAll('.nav-link');
-                links.forEach(l => {
+                document.querySelectorAll('.nav-link').forEach(l => {
                     if (l.getAttribute('onclick')?.includes(page)) l.classList.add('active');
                 });
             }
-
             const el = document.getElementById('mainContent');
             switch(page) {
                 case 'dashboard': renderDashboard(el); break;
@@ -163,7 +213,7 @@ HTML = r"""
                     <div class="col-md-4">
                         <div class="card p-4 text-center">
                             <h5>📋 飞书表格</h5>
-                            <p class="text-muted">查看和管理飞书多维表格</p>
+                            <p class="text-muted">查看飞书多维表格</p>
                             <button class="btn btn-primary" onclick="loadPage('feishu_tables')">进入</button>
                         </div>
                     </div>
@@ -219,10 +269,9 @@ HTML = r"""
                     el.innerHTML = '<p class="text-muted">暂无数据表，请先配置飞书凭证</p>';
                     return;
                 }
-                let html = '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>表名</th><th>表 ID</th><th>操作</th></tr></thead><tbody>';
+                let html = '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>表名</th><th>表 ID</th></tr></thead><tbody>';
                 items.forEach(t => {
-                    html += '<tr><td>' + (t.name || '-') + '</td><td><code>' + (t.table_id || '-') + '</code></td>';
-                    html += '<td><button class="btn btn-sm btn-outline-primary" onclick="alert(\'查看记录功能开发中\')">查看记录</button></td></tr>';
+                    html += '<tr><td>' + (t.name || '-') + '</td><td><code>' + (t.table_id || '-') + '</code></td></tr>';
                 });
                 html += '</tbody></table></div>';
                 el.innerHTML = html;
@@ -240,7 +289,7 @@ HTML = r"""
                         <p class="text-muted">查看寄样表中的数据</p>
                     </div>
                     <div>
-                        <input type="text" class="form-control form-control-sm d-inline-block w-auto" id="recordLimit" placeholder="条数" value="20" style="width:80px">
+                        <input type="number" class="form-control form-control-sm d-inline-block w-auto" id="recordLimit" value="20" style="width:80px">
                         <button class="btn btn-primary btn-sm" onclick="loadFeishuRecords()">🔄 加载</button>
                     </div>
                 </div>
@@ -267,23 +316,22 @@ HTML = r"""
                     el.innerHTML = '<p class="text-muted">暂无记录</p>';
                     return;
                 }
-                let html = '<div class="table-responsive"><table class="table table-sm table-hover"><thead><tr>';
-                // 取第一条的字段名作为表头
                 const fields = items[0].fields || {};
                 const headers = Object.keys(fields).slice(0, 10);
+                let html = '<div class="table-responsive"><table class="table table-sm table-hover"><thead><tr>';
                 headers.forEach(h => { html += '<th>' + h + '</th>'; });
-                html += '<th>操作</th></tr></thead><tbody>';
+                html += '</tr></thead><tbody>';
                 items.forEach(item => {
                     const f = item.fields || {};
                     html += '<tr>';
                     headers.forEach(h => {
                         let val = f[h];
                         if (val === null || val === undefined) val = '-';
-                        else if (typeof val === 'object') val = JSON.stringify(val);
+                        else if (typeof val === 'object') val = JSON.stringify(val).substring(0, 20);
                         else val = String(val).substring(0, 30);
                         html += '<td><small>' + val + '</small></td>';
                     });
-                    html += '<td><button class="btn btn-sm btn-outline-secondary">详情</button></td></tr>';
+                    html += '</tr>';
                 });
                 html += '</tbody></table></div>';
                 html += '<p class="text-muted">共 ' + data.total + ' 条记录，显示前 ' + items.length + ' 条</p>';
@@ -312,7 +360,6 @@ HTML = r"""
                     <div id="syncResult" class="result-box" style="display:none"></div>
                 </div>
             `;
-            // 拖拽支持
             const zone = document.getElementById('uploadZone');
             if (zone) {
                 zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
@@ -337,11 +384,9 @@ HTML = r"""
             const resultEl = document.getElementById('syncResult');
             resultEl.style.display = 'block';
             resultEl.innerHTML = '<p>上传中...</p>';
-
             const formData = new FormData();
             formData.append('csv', file);
             formData.append('dry_run', document.getElementById('dryRun').checked ? '1' : '0');
-
             try {
                 const res = await fetch('/api/feishu/sync', { method: 'POST', body: formData });
                 const data = await res.json();
@@ -356,19 +401,14 @@ HTML = r"""
                 html += '<tr><td>计划更新</td><td>' + (data.planned_updates || 0) + '</td></tr>';
                 html += '<tr><td>已更新</td><td>' + (data.updated || 0) + '</td></tr>';
                 html += '<tr><td>错误</td><td>' + (data.errors?.length || 0) + '</td></tr></table>';
-
                 if (data.field_changes && Object.keys(data.field_changes).length > 0) {
                     html += '<h6>字段变更统计：</h6><ul>';
-                    for (const [k, v] of Object.entries(data.field_changes)) {
-                        html += '<li>' + k + ': ' + v + ' 次</li>';
-                    }
+                    for (const [k, v] of Object.entries(data.field_changes)) html += '<li>' + k + ': ' + v + ' 次</li>';
                     html += '</ul>';
                 }
                 if (data.status_changes && Object.keys(data.status_changes).length > 0) {
                     html += '<h6>签收状态变更：</h6><ul>';
-                    for (const [k, v] of Object.entries(data.status_changes)) {
-                        html += '<li>' + k + ': ' + v + ' 条</li>';
-                    }
+                    for (const [k, v] of Object.entries(data.status_changes)) html += '<li>' + k + ': ' + v + ' 条</li>';
                     html += '</ul>';
                 }
                 if (data.errors && data.errors.length > 0) {
@@ -380,69 +420,109 @@ HTML = r"""
             }
         }
 
-        // ═══════════════ 飞书配置 ═══════════════
+        // ═══════════════ 飞书配置（可输入保存） ═══════════════
         function renderFeishuConfig(el) {
             el.innerHTML = `
                 <div class="page-title">
                     <h2>⚙️ 飞书配置</h2>
-                    <p class="text-muted">配置飞书开放平台 API 凭证</p>
+                    <p class="text-muted">输入飞书 API 凭证，保存后即可使用</p>
                 </div>
                 <div class="card p-4">
-                    <p>在 Railway 后台设置以下环境变量：</p>
-                    <table class="table">
-                        <tr><td><code>FEISHU_APP_ID</code></td><td>飞书应用的 App ID</td></tr>
-                        <tr><td><code>FEISHU_APP_SECRET</code></td><td>飞书应用的 App Secret</td></tr>
-                        <tr><td><code>FEISHU_APP_TOKEN</code></td><td>寄样表的 app_token</td></tr>
-                        <tr><td><code>FEISHU_TABLE_ID</code></td><td>寄样表的 table_id（当前：<code>tblRWlmlvudYAruS</code>）</td></tr>
-                    </table>
-                    <div id="configStatus"></div>
-                    <button class="btn btn-primary mt-3" onclick="checkFeishuConfig()">🔍 检查配置状态</button>
+                    <form class="config-form" onsubmit="return saveFeishuConfig()">
+                        <div class="mb-3">
+                            <label>FEISHU_APP_ID <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="cfgAppId" placeholder="飞书应用的 App ID" required>
+                            <div class="form-text">飞书开放平台 → 应用 → 凭证与基础信息</div>
+                        </div>
+                        <div class="mb-3">
+                            <label>FEISHU_APP_SECRET <span class="text-danger">*</span></label>
+                            <input type="password" class="form-control" id="cfgAppSecret" placeholder="飞书应用的 App Secret" required>
+                            <div class="form-text">飞书开放平台 → 应用 → 凭证与基础信息</div>
+                        </div>
+                        <div class="mb-3">
+                            <label>FEISHU_APP_TOKEN <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="cfgAppToken" placeholder="多维表格的 app_token" required>
+                            <div class="form-text">打开寄样表 → URL 中 /base/ 后面的那串字符</div>
+                        </div>
+                        <div class="mb-3">
+                            <label>FEISHU_TABLE_ID</label>
+                            <input type="text" class="form-control" id="cfgTableId" placeholder="寄样表的 table_id" value="tblRWlmlvudYAruS">
+                            <div class="form-text">默认已填写，一般不需要改</div>
+                        </div>
+                        <div class="d-flex gap-2">
+                            <button type="submit" class="btn btn-primary">💾 保存配置</button>
+                            <button type="button" class="btn btn-outline-secondary" onclick="testFeishuConfig()">🔍 测试连接</button>
+                            <button type="button" class="btn btn-outline-info" onclick="loadFeishuConfig()">📂 加载已保存</button>
+                        </div>
+                    </form>
+                    <div id="configStatus" class="mt-3"></div>
                 </div>
             `;
+            // 自动加载已保存的配置
+            loadFeishuConfig();
         }
 
-        async function checkFeishuConfig() {
+        async function loadFeishuConfig() {
+            try {
+                const res = await fetch('/api/feishu/config');
+                const data = await res.json();
+                if (data.app_id) document.getElementById('cfgAppId').value = data.app_id;
+                if (data.app_secret) document.getElementById('cfgAppSecret').value = data.app_secret;
+                if (data.app_token) document.getElementById('cfgAppToken').value = data.app_token;
+                if (data.table_id) document.getElementById('cfgTableId').value = data.table_id;
+            } catch(e) {}
+        }
+
+        async function saveFeishuConfig() {
+            const data = {
+                app_id: document.getElementById('cfgAppId').value.trim(),
+                app_secret: document.getElementById('cfgAppSecret').value.trim(),
+                app_token: document.getElementById('cfgAppToken').value.trim(),
+                table_id: document.getElementById('cfgTableId').value.trim(),
+            };
+            if (!data.app_id || !data.app_secret || !data.app_token) {
+                showToast('请填写必填字段', 'warning');
+                return false;
+            }
+            try {
+                const res = await fetch('/api/feishu/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data),
+                });
+                const result = await res.json();
+                if (result.ok) {
+                    showToast('✅ 配置已保存', 'success');
+                } else {
+                    showToast('保存失败: ' + (result.error || '未知错误'), 'danger');
+                }
+            } catch(e) {
+                showToast('保存失败: ' + e.message, 'danger');
+            }
+            return false;
+        }
+
+        async function testFeishuConfig() {
             const el = document.getElementById('configStatus');
-            el.innerHTML = '<p>检查中...</p>';
+            el.innerHTML = '<p>测试连接中...</p>';
             try {
                 const res = await fetch('/api/feishu/check');
                 const data = await res.json();
                 if (data.ok) {
-                    el.innerHTML = '<div class="alert alert-success">✅ 飞书配置正常，连接成功</div>';
+                    el.innerHTML = '<div class="alert alert-success">✅ 连接成功！飞书配置正常</div>';
                 } else {
-                    el.innerHTML = '<div class="alert alert-warning">⚠️ ' + (data.error || '配置不完整') + '</div>';
+                    el.innerHTML = '<div class="alert alert-warning">⚠️ ' + (data.error || '连接失败') + '</div>';
                 }
             } catch(e) {
-                el.innerHTML = '<div class="alert alert-danger">检查失败: ' + e.message + '</div>';
+                el.innerHTML = '<div class="alert alert-danger">测试失败: ' + e.message + '</div>';
             }
         }
 
-        // ── 启动 ──
         document.addEventListener('DOMContentLoaded', () => renderDashboard(document.getElementById('mainContent')));
     </script>
 </body>
 </html>
 """
-
-
-# ── 飞书 API 辅助 ──
-
-def get_feishu_service():
-    """获取飞书服务实例，失败返回 None"""
-    try:
-        config = load_feishu_config()
-        client = FeishuClient(config)
-        return BitableService(client)
-    except Exception as e:
-        return None
-
-
-def get_feishu_app_token():
-    return os.getenv("FEISHU_APP_TOKEN", "")
-
-
-def get_feishu_table_id():
-    return os.getenv("FEISHU_TABLE_ID", "tblRWlmlvudYAruS")
 
 
 # ── 页面路由 ──
@@ -452,7 +532,48 @@ def index():
     return render_template_string(HTML, time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 
-# ── API 路由 ──
+# ── 配置 API ──
+
+@app.route("/api/feishu/config", methods=["GET"])
+def api_get_feishu_config():
+    """获取已保存的配置（隐藏部分 secret）"""
+    cfg = get_feishu_config()
+    # 返回时隐藏部分 secret
+    secret = cfg.get("app_secret", "")
+    if len(secret) > 8:
+        cfg["app_secret"] = secret[:4] + "****" + secret[-4:]
+    return jsonify(cfg)
+
+
+@app.route("/api/feishu/config", methods=["POST"])
+def api_save_feishu_config():
+    """保存飞书配置"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": False, "error": "无效的请求数据"})
+
+        app_id = (data.get("app_id") or "").strip()
+        app_secret = (data.get("app_secret") or "").strip()
+        app_token = (data.get("app_token") or "").strip()
+        table_id = (data.get("table_id") or "").strip()
+
+        if not app_id or not app_secret or not app_token:
+            return jsonify({"ok": False, "error": "App ID、App Secret、App Token 为必填项"})
+
+        save_config_to_file({
+            "app_id": app_id,
+            "app_secret": app_secret,
+            "app_token": app_token,
+            "table_id": table_id or "tblRWlmlvudYAruS",
+        })
+
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+# ── 飞书 API ──
 
 @app.route("/api/feishu/check")
 def api_feishu_check():
@@ -460,12 +581,11 @@ def api_feishu_check():
     try:
         service = get_feishu_service()
         if not service:
-            return jsonify({"ok": False, "error": "飞书配置不完整，请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET"})
-        app_token = get_feishu_app_token()
-        if not app_token:
-            return jsonify({"ok": False, "error": "缺少 FEISHU_APP_TOKEN"})
-        # 测试连接
-        service.list_tables(app_token, page_size=1)
+            return jsonify({"ok": False, "error": "飞书配置不完整，请填写 App ID 和 App Secret"})
+        cfg = get_feishu_config()
+        if not cfg["app_token"]:
+            return jsonify({"ok": False, "error": "缺少 App Token"})
+        service.list_tables(cfg["app_token"], page_size=1)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -478,10 +598,10 @@ def api_feishu_tables():
         service = get_feishu_service()
         if not service:
             return jsonify({"error": "飞书配置不完整"})
-        app_token = get_feishu_app_token()
-        if not app_token:
-            return jsonify({"error": "缺少 FEISHU_APP_TOKEN"})
-        result = service.list_tables(app_token)
+        cfg = get_feishu_config()
+        if not cfg["app_token"]:
+            return jsonify({"error": "缺少 App Token"})
+        result = service.list_tables(cfg["app_token"])
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)})
@@ -494,12 +614,11 @@ def api_feishu_records():
         service = get_feishu_service()
         if not service:
             return jsonify({"error": "飞书配置不完整", "items": [], "total": 0})
-        app_token = get_feishu_app_token()
-        table_id = get_feishu_table_id()
-        if not app_token or not table_id:
-            return jsonify({"error": "缺少 FEISHU_APP_TOKEN 或 FEISHU_TABLE_ID", "items": [], "total": 0})
+        cfg = get_feishu_config()
+        if not cfg["app_token"] or not cfg["table_id"]:
+            return jsonify({"error": "缺少 App Token 或 Table ID", "items": [], "total": 0})
         page_size = request.args.get("page_size", 20, type=int)
-        result = service.list_records(app_token, table_id, page_size=page_size)
+        result = service.list_records(cfg["app_token"], cfg["table_id"], page_size=page_size)
         data = result.get("data") or {}
         items = data.get("items") or []
         total = data.get("total", 0)
@@ -521,35 +640,29 @@ def api_feishu_sync():
 
         dry_run = request.form.get("dry_run", "1") == "1"
 
-        # 保存上传的 CSV
         upload_dir = Path("/tmp/feishu_uploads")
         upload_dir.mkdir(parents=True, exist_ok=True)
         csv_path = upload_dir / f"upload_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
         file.save(str(csv_path))
 
-        # 加载配置
         service = get_feishu_service()
         if not service:
             return jsonify({"error": "飞书配置不完整"})
 
-        app_token = get_feishu_app_token()
-        table_id = get_feishu_table_id()
+        cfg = get_feishu_config()
 
-        from feishu.csv_sync import (
-            CsvSyncConfig, CsvSyncResult, sync_csv_to_bitable
-        )
+        from feishu.csv_sync import CsvSyncConfig, sync_csv_to_bitable
 
         rules_path = Path(__file__).parent / "feishu" / "feishu_csv_update_rules.json"
 
-        config = CsvSyncConfig(
-            app_token=app_token,
-            table_id=table_id,
+        sync_config = CsvSyncConfig(
+            app_token=cfg["app_token"],
+            table_id=cfg["table_id"],
             csv_path=csv_path,
             rules_path=rules_path,
         )
 
-        result = sync_csv_to_bitable(service, config, dry_run=dry_run)
-
+        result = sync_csv_to_bitable(service, sync_config, dry_run=dry_run)
         return jsonify(result.to_dict())
     except Exception as e:
         return jsonify({"error": str(e)})
