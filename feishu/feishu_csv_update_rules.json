@@ -1,0 +1,137 @@
+{
+  "source": {
+    "csv_path": "C:\\Users\\EDY\\Desktop\\ldg\\manage orders\\C-H-0615.csv",
+    "table_name": "Manage orders"
+  },
+  "target": {
+    "table_name": "寄样表",
+    "table_id": "tblRWlmlvudYAruS",
+    "records_path": "D:\\fs\\feishu_jiyang_records_all.json"
+  },
+  "match": {
+    "csv_field": "Order ID",
+    "feishu_field": "订单ID",
+    "duplicate_feishu_records": "update_all_matching_records",
+    "normalize": "strip_whitespace"
+  },
+  "field_mapping": {
+    "Recipient": "收件人姓名",
+    "Buyer Username": "达人ID",
+    "Phone #": "联系方式",
+    "Order ID": "订单ID",
+    "Tracking ID": "物流单号",
+    "Order Substatus": "签收状态",
+    "Delivered Time": "签收日期"
+  },
+  "sign_status_mapping": {
+    "运输中": [
+      "Pending",
+      "Processing",
+      "Info Received",
+      "Awaiting pickup",
+      "Awaiting shipment",
+      "Shipped",
+      "In transit",
+      "Departed origin",
+      "Arrived destination",
+      "Customs clearance",
+      "Customs cleared",
+      "Arrived at sorting hub",
+      "Out for delivery",
+      "Delivery scheduled",
+      "Awaiting self-pickup",
+      "Awaiting collection",
+      "Delayed"
+    ],
+    "已签收": [
+      "Delivered",
+      "Completed"
+    ],
+    "物流异常": [
+      "Customs detained",
+      "Damaged"
+    ],
+    "派送失败": [
+      "Delivery failed",
+      "Attempted delivery"
+    ],
+    "包裹丢失": [
+      "Lost"
+    ],
+    "包裹异常退件中": [
+      "Refused by recipient",
+      "Returned to sender",
+      "Return processing"
+    ],
+    "订单异常": [
+      "On hold",
+      "Cancelled",
+      "Canceled",
+      "Refunded"
+    ]
+  },
+  "sign_status_update_rules": {
+    "semantic_fallback_scope": "仅限签收状态",
+    "semantic_fallback": "如果 CSV 出现未列出的 Order Substatus，按语义就近归类；实际更新前列出新增映射供确认。",
+    "protect_existing_status": {
+      "enabled": true,
+      "rule": "如果寄样表原签收状态已填写，且不是允许覆盖状态之一，则不更新签收状态。",
+      "overwritable_statuses": [
+        "运输中",
+        "已签收",
+        "物流异常",
+        "派送失败",
+        "包裹丢失",
+        "包裹异常退件中",
+        "订单异常"
+      ]
+    },
+    "video_link_priority": {
+      "enabled": true,
+      "feishu_field": "视频链接",
+      "rule": "如果寄样表视频链接非空，则签收状态更新为已发布。",
+      "status": "已发布"
+    }
+  },
+  "date_fields": {
+    "Delivered Time": {
+      "target_field": "签收日期",
+      "normalize": "strip_whitespace",
+      "precision": "date_only",
+      "overwrite_existing": true,
+      "empty_source_clears_target": true,
+      "rule": "只保留日期，不保留具体时间；以 CSV 的 Delivered Time 为准，允许覆盖寄样表原签收日期。"
+    }
+  },
+  "query_date_update_rules": {
+    "target_field": "查询日期",
+    "precision": "date_only",
+    "rule": "仅当签收状态发生更改时，写入执行更新时的实时日期；如果签收状态没有更改，则查询日期保持原值不变。"
+  },
+  "update_scope": {
+    "rule": "只更新用户明确给出的字段，其余字段不更新；除签收状态外，其它映射字段全部以 CSV 表格为准，允许 CSV 空值覆盖寄样表原值。",
+    "allowed_target_fields": [
+      "收件人姓名",
+      "达人ID",
+      "联系方式",
+      "订单ID",
+      "物流单号",
+      "签收状态",
+      "签收日期",
+      "查询日期"
+    ],
+    "csv_source_of_truth_fields": [
+      "收件人姓名",
+      "达人ID",
+      "联系方式",
+      "订单ID",
+      "物流单号",
+      "签收日期"
+    ],
+    "csv_empty_values_overwrite_target": true,
+    "sign_status_uses_mapping_rules": true,
+    "read_only_condition_fields": [
+      "视频链接"
+    ]
+  }
+}
