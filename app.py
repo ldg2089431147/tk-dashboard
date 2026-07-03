@@ -32,7 +32,10 @@ def load_all_profiles() -> dict:
             # 兼容旧格式：单套配置直接转
             if "app_id" in data:
                 name = data.get("name", "默认")
-                return {name: data}
+                profiles = {name: data}
+                # 自动迁移为多配置格式
+                CONFIG_FILE.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
+                return profiles
             return data
         except Exception:
             return {}
