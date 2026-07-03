@@ -595,9 +595,21 @@ HTML = r"""
 
         async function testFeishuConfig() {
             const el = document.getElementById('configStatus');
+            const app_id = document.getElementById('cfgAppId').value.trim();
+            const app_secret = document.getElementById('cfgAppSecret').value.trim();
+            const app_token = document.getElementById('cfgAppToken').value.trim();
+            const table_id = document.getElementById('cfgTableId').value.trim();
+            if (!app_id || !app_secret || !app_token) {
+                showToast('请先填写 App ID、Secret 和 Token', 'warning');
+                return;
+            }
             el.innerHTML = '<p>测试连接中...</p>';
             try {
-                const res = await fetch('/api/feishu/check');
+                const res = await fetch('/api/feishu/check', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ app_id, app_secret, app_token, table_id }),
+                });
                 const data = await res.json();
                 if (data.ok) {
                     el.innerHTML = '<div class="alert alert-success">✅ 连接成功！飞书配置正常</div>';
@@ -701,10 +713,25 @@ def api_delete_feishu_config():
 
 # ── 飞书 API ──
 
-@app.route("/api/feishu/check")
+@app.route("/api/feishu/check", methods=["GET", "POST"])
 def api_feishu_check():
     """检查飞书配置"""
     try:
+        if request.method == "POST":
+            # 用表单提交的配置测试
+            data = request.get_json() or {}
+            app_id = data.get("app_id", "")
+            app_secret = data.get("app_secret", "")
+            app_token = data.get("app_token", "")
+            table_id = data.get("table_id", "")
+            if not app_id or not app_secret or not app_token:
+                return jsonify({"ok": False, "error": "请填写 App ID、App Secret 和 App Token"})
+            feishu_cfg = FeishuConfig(app_id=app_id, app_secret=app_secret)
+            client = FeishuClient(feishu_cfg)
+            service = BitableService(client)
+            service.list_tables(app_token, page_size=1)
+            return jsonify({"ok": True})
+        
         name = request.args.get("name", "")
         service = get_feishu_service(name or None)
         if not service:
