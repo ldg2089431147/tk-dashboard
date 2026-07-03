@@ -20,40 +20,67 @@ from feishu.client import FeishuClient
 from feishu.bitable import BitableService
 from feishu.exceptions import FeishuError
 
-# ── 配置存储 ──
+# ── 配置存储（多套配置） ──
 CONFIG_FILE = Path(__file__).parent / "feishu_config.json"
 
 
-def load_saved_config() -> dict:
-    """从文件读取保存的飞书配置"""
+def load_all_profiles() -> dict:
+    """读取所有保存的配置档案"""
     if CONFIG_FILE.exists():
         try:
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            # 兼容旧格式：单套配置直接转
+            if "app_id" in data:
+                name = data.get("name", "默认")
+                return {name: data}
+            return data
         except Exception:
             return {}
     return {}
 
 
-def save_config_to_file(data: dict):
-    """保存飞书配置到文件"""
-    CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_profile(name: str, data: dict):
+    """保存一套配置档案"""
+    profiles = load_all_profiles()
+    profiles[name] = {
+        "name": name,
+        "app_id": data.get("app_id", ""),
+        "app_secret": data.get("app_secret", ""),
+        "app_token": data.get("app_token", ""),
+        "table_id": data.get("table_id", "tblRWlmlvudYAruS"),
+    }
+    CONFIG_FILE.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def get_feishu_config():
-    """获取飞书配置：优先从文件读取，其次环境变量"""
-    saved = load_saved_config()
+def delete_profile(name: str):
+    """删除一套配置档案"""
+    profiles = load_all_profiles()
+    profiles.pop(name, None)
+    CONFIG_FILE.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_active_config(profile_name: str | None = None):
+    """获取指定档案的配置，未指定则用第一个"""
+    profiles = load_all_profiles()
+    if profile_name and profile_name in profiles:
+        return profiles[profile_name]
+    # 取第一个
+    for name, cfg in profiles.items():
+        return cfg
+    # 都没有则用环境变量
     return {
-        "app_id": saved.get("app_id") or os.getenv("FEISHU_APP_ID", ""),
-        "app_secret": saved.get("app_secret") or os.getenv("FEISHU_APP_SECRET", ""),
-        "app_token": saved.get("app_token") or os.getenv("FEISHU_APP_TOKEN", ""),
-        "table_id": saved.get("table_id") or os.getenv("FEISHU_TABLE_ID", "tblRWlmlvudYAruS"),
+        "name": "",
+        "app_id": os.getenv("FEISHU_APP_ID", ""),
+        "app_secret": os.getenv("FEISHU_APP_SECRET", ""),
+        "app_token": os.getenv("FEISHU_APP_TOKEN", ""),
+        "table_id": os.getenv("FEISHU_TABLE_ID", "tblRWlmlvudYAruS"),
     }
 
 
-def get_feishu_service():
+def get_feishu_service(profile_name: str | None = None):
     """获取飞书服务实例"""
-    cfg = get_feishu_config()
-    if not cfg["app_id"] or not cfg["app_secret"]:
+    cfg = get_active_config(profile_name)
+    if not cfg.get("app_id") or not cfg.get("app_secret"):
         return None
     try:
         feishu_cfg = FeishuConfig(app_id=cfg["app_id"], app_secret=cfg["app_secret"])
@@ -420,14 +447,28 @@ HTML = r"""
             }
         }
 
-        // ═══════════════ 飞书配置（可输入保存） ═══════════════
+        // ═══════════════ 飞书配置（多套配置） ═══════════════
+        let configProfiles = {};
+        let currentProfileName = '';
+
         function renderFeishuConfig(el) {
             el.innerHTML = `
-                <div class="page-title">
-                    <h2>⚙️ 飞书配置</h2>
-                    <p class="text-muted">输入飞书 API 凭证，保存后即可使用</p>
+                <div class="page-title d-flex justify-content-between align-items-center">
+                    <div>
+                        <h2>⚙️ 飞书配置</h2>
+                        <p class="text-muted">管理多套飞书 API 凭证</p>
+                    </div>
+                    <div>
+                        <button class="btn btn-outline-info btn-sm" onclick="showProfileSelector()">📂 加载配置</button>
+                        <button class="btn btn-outline-danger btn-sm ms-1" onclick="deleteCurrentProfile()">🗑️ 删除</button>
+                    </div>
                 </div>
                 <div class="card p-4">
+                    <div class="mb-3">
+                        <label>配置名称 <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="cfgName" placeholder="例如：TK店铺A、TK店铺B" value="默认">
+                        <div class="form-text">给这套配置起个名字，方便以后切换</div>
+                    </div>
                     <form class="config-form" onsubmit="return saveFeishuConfig()">
                         <div class="mb-3">
                             <label>FEISHU_APP_ID <span class="text-danger">*</span></label>
@@ -452,34 +493,63 @@ HTML = r"""
                         <div class="d-flex gap-2">
                             <button type="submit" class="btn btn-primary">💾 保存配置</button>
                             <button type="button" class="btn btn-outline-secondary" onclick="testFeishuConfig()">🔍 测试连接</button>
-                            <button type="button" class="btn btn-outline-info" onclick="loadFeishuConfig()">📂 加载已保存</button>
                         </div>
                     </form>
                     <div id="configStatus" class="mt-3"></div>
                 </div>
             `;
-            // 自动加载已保存的配置
-            loadFeishuConfig();
+            loadProfileList();
         }
 
-        async function loadFeishuConfig() {
+        async function loadProfileList() {
             try {
-                const res = await fetch('/api/feishu/config');
-                const data = await res.json();
-                if (data.app_id) document.getElementById('cfgAppId').value = data.app_id;
-                if (data.app_secret) document.getElementById('cfgAppSecret').value = data.app_secret;
-                if (data.app_token) document.getElementById('cfgAppToken').value = data.app_token;
-                if (data.table_id) document.getElementById('cfgTableId').value = data.table_id;
+                const res = await fetch('/api/feishu/profiles');
+                configProfiles = await res.json();
             } catch(e) {}
         }
 
+        function showProfileSelector() {
+            const names = Object.keys(configProfiles);
+            if (names.length === 0) {
+                showToast('没有已保存的配置', 'warning');
+                return;
+            }
+            let html = '<div class="list-group">';
+            names.forEach(name => {
+                const p = configProfiles[name];
+                const masked = p.app_secret ? p.app_secret.substring(0, 4) + '****' : '';
+                html += '<button class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" onclick="applyProfile(\'' + name + '\')">';
+                html += '<div><strong>' + name + '</strong><br><small class="text-muted">' + p.app_id + ' | ' + masked + '</small></div>';
+                html += '<span class="badge bg-primary rounded-pill">加载</span></button>';
+            });
+            html += '</div>';
+
+            const el = document.getElementById('configStatus');
+            el.innerHTML = '<div class="card p-3"><h6>选择要加载的配置：</h6>' + html + '</div>';
+        }
+
+        function applyProfile(name) {
+            const p = configProfiles[name];
+            if (!p) return;
+            document.getElementById('cfgName').value = name;
+            document.getElementById('cfgAppId').value = p.app_id || '';
+            document.getElementById('cfgAppSecret').value = p.app_secret || '';
+            document.getElementById('cfgAppToken').value = p.app_token || '';
+            document.getElementById('cfgTableId').value = p.table_id || 'tblRWlmlvudYAruS';
+            currentProfileName = name;
+            document.getElementById('configStatus').innerHTML = '<div class="alert alert-success">✅ 已加载配置: ' + name + '</div>';
+            showToast('已加载: ' + name, 'success');
+        }
+
         async function saveFeishuConfig() {
+            const name = document.getElementById('cfgName').value.trim();
             const data = {
                 app_id: document.getElementById('cfgAppId').value.trim(),
                 app_secret: document.getElementById('cfgAppSecret').value.trim(),
                 app_token: document.getElementById('cfgAppToken').value.trim(),
                 table_id: document.getElementById('cfgTableId').value.trim(),
             };
+            if (!name) { showToast('请输入配置名称', 'warning'); return false; }
             if (!data.app_id || !data.app_secret || !data.app_token) {
                 showToast('请填写必填字段', 'warning');
                 return false;
@@ -488,11 +558,12 @@ HTML = r"""
                 const res = await fetch('/api/feishu/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data),
+                    body: JSON.stringify({ name: name, ...data }),
                 });
                 const result = await res.json();
                 if (result.ok) {
-                    showToast('✅ 配置已保存', 'success');
+                    showToast('✅ 配置已保存: ' + name, 'success');
+                    await loadProfileList();
                 } else {
                     showToast('保存失败: ' + (result.error || '未知错误'), 'danger');
                 }
@@ -500,6 +571,26 @@ HTML = r"""
                 showToast('保存失败: ' + e.message, 'danger');
             }
             return false;
+        }
+
+        async function deleteCurrentProfile() {
+            const name = document.getElementById('cfgName').value.trim();
+            if (!name || !configProfiles[name]) {
+                showToast('当前配置不存在或未保存', 'warning');
+                return;
+            }
+            if (!confirm('确定删除配置「' + name + '」吗？')) return;
+            try {
+                const res = await fetch('/api/feishu/config?name=' + encodeURIComponent(name), { method: 'DELETE' });
+                const result = await res.json();
+                if (result.ok) {
+                    showToast('已删除: ' + name, 'success');
+                    await loadProfileList();
+                    document.getElementById('configStatus').innerHTML = '';
+                }
+            } catch(e) {
+                showToast('删除失败: ' + e.message, 'danger');
+            }
         }
 
         async function testFeishuConfig() {
@@ -534,11 +625,39 @@ def index():
 
 # ── 配置 API ──
 
+@app.route("/api/feishu/profiles")
+def api_list_profiles():
+    """列出所有已保存的配置档案"""
+    profiles = load_all_profiles()
+    # 隐藏 secret 中间部分
+    result = {}
+    for name, cfg in profiles.items():
+        secret = cfg.get("app_secret", "")
+        if len(secret) > 8:
+            masked = secret[:4] + "****" + secret[-4:]
+        else:
+            masked = secret[:2] + "****" if secret else ""
+        result[name] = {
+            "name": name,
+            "app_id": cfg.get("app_id", ""),
+            "app_secret": masked,
+            "app_token": cfg.get("app_token", ""),
+            "table_id": cfg.get("table_id", ""),
+        }
+    return jsonify(result)
+
+
 @app.route("/api/feishu/config", methods=["GET"])
 def api_get_feishu_config():
-    """获取已保存的配置"""
-    cfg = get_feishu_config()
-    return jsonify(cfg)
+    """获取指定配置（含完整 secret，用于加载）"""
+    name = request.args.get("name", "")
+    profiles = load_all_profiles()
+    if name and name in profiles:
+        return jsonify(profiles[name])
+    # 取第一个
+    for n, cfg in profiles.items():
+        return jsonify(cfg)
+    return jsonify({})
 
 
 @app.route("/api/feishu/config", methods=["POST"])
@@ -549,6 +668,7 @@ def api_save_feishu_config():
         if not data:
             return jsonify({"ok": False, "error": "无效的请求数据"})
 
+        name = (data.get("name") or "默认").strip()
         app_id = (data.get("app_id") or "").strip()
         app_secret = (data.get("app_secret") or "").strip()
         app_token = (data.get("app_token") or "").strip()
@@ -557,7 +677,7 @@ def api_save_feishu_config():
         if not app_id or not app_secret or not app_token:
             return jsonify({"ok": False, "error": "App ID、App Secret、App Token 为必填项"})
 
-        save_config_to_file({
+        save_profile(name, {
             "app_id": app_id,
             "app_secret": app_secret,
             "app_token": app_token,
@@ -569,17 +689,28 @@ def api_save_feishu_config():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.route("/api/feishu/config", methods=["DELETE"])
+def api_delete_feishu_config():
+    """删除一套配置"""
+    name = request.args.get("name", "")
+    if not name:
+        return jsonify({"ok": False, "error": "缺少配置名称"})
+    delete_profile(name)
+    return jsonify({"ok": True})
+
+
 # ── 飞书 API ──
 
 @app.route("/api/feishu/check")
 def api_feishu_check():
     """检查飞书配置"""
     try:
-        service = get_feishu_service()
+        name = request.args.get("name", "")
+        service = get_feishu_service(name or None)
         if not service:
             return jsonify({"ok": False, "error": "飞书配置不完整，请填写 App ID 和 App Secret"})
-        cfg = get_feishu_config()
-        if not cfg["app_token"]:
+        cfg = get_active_config(name or None)
+        if not cfg.get("app_token"):
             return jsonify({"ok": False, "error": "缺少 App Token"})
         service.list_tables(cfg["app_token"], page_size=1)
         return jsonify({"ok": True})
@@ -591,11 +722,12 @@ def api_feishu_check():
 def api_feishu_tables():
     """获取飞书表格列表"""
     try:
-        service = get_feishu_service()
+        name = request.args.get("name", "")
+        service = get_feishu_service(name or None)
         if not service:
             return jsonify({"error": "飞书配置不完整"})
-        cfg = get_feishu_config()
-        if not cfg["app_token"]:
+        cfg = get_active_config(name or None)
+        if not cfg.get("app_token"):
             return jsonify({"error": "缺少 App Token"})
         result = service.list_tables(cfg["app_token"])
         return jsonify(result)
@@ -607,11 +739,12 @@ def api_feishu_tables():
 def api_feishu_records():
     """获取寄样表记录"""
     try:
-        service = get_feishu_service()
+        name = request.args.get("name", "")
+        service = get_feishu_service(name or None)
         if not service:
             return jsonify({"error": "飞书配置不完整", "items": [], "total": 0})
-        cfg = get_feishu_config()
-        if not cfg["app_token"] or not cfg["table_id"]:
+        cfg = get_active_config(name or None)
+        if not cfg.get("app_token") or not cfg.get("table_id"):
             return jsonify({"error": "缺少 App Token 或 Table ID", "items": [], "total": 0})
         page_size = request.args.get("page_size", 20, type=int)
         result = service.list_records(cfg["app_token"], cfg["table_id"], page_size=page_size)
@@ -635,17 +768,18 @@ def api_feishu_sync():
             return jsonify({"error": "请上传 CSV 文件"})
 
         dry_run = request.form.get("dry_run", "1") == "1"
+        profile_name = request.form.get("profile", "")
 
         upload_dir = Path("/tmp/feishu_uploads")
         upload_dir.mkdir(parents=True, exist_ok=True)
         csv_path = upload_dir / f"upload_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
         file.save(str(csv_path))
 
-        service = get_feishu_service()
+        service = get_feishu_service(profile_name or None)
         if not service:
             return jsonify({"error": "飞书配置不完整"})
 
-        cfg = get_feishu_config()
+        cfg = get_active_config(profile_name or None)
 
         from feishu.csv_sync import CsvSyncConfig, sync_csv_to_bitable
 
