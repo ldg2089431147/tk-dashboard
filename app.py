@@ -1,10 +1,7 @@
-"""TikTok Shop + 飞书寄样表 管理后台"""
-import os
-import json
-import sys
+"""TK + 飞书寄样表 4步同步工具"""
+import os, json, sys, csv, io, time
 from datetime import datetime
 from pathlib import Path
-
 from flask import Flask, render_template_string, jsonify, request
 from dotenv import load_dotenv
 
@@ -13,820 +10,483 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.urandom(24).hex()
 
-# ── 飞书模块 ──
 sys.path.insert(0, os.path.dirname(__file__))
-from feishu.config import load_config as load_feishu_config, FeishuConfig
+from feishu.config import FeishuConfig
 from feishu.client import FeishuClient
 from feishu.bitable import BitableService
-from feishu.exceptions import FeishuError
+from feishu.csv_sync import (
+    read_csv_by_order, build_status_lookup, load_rules,
+    sync_csv_to_bitable, CsvSyncConfig, CsvSyncResult,
+)
 
-# ── 配置存储（多套配置） ──
 CONFIG_FILE = Path(__file__).parent / "feishu_config.json"
+RULES_PATH = Path(__file__).parent / "feishu" / "feishu_csv_update_rules.json"
+UPLOAD_DIR = Path("/tmp/feishu_uploads")
 
-
-def load_all_profiles() -> dict:
-    """读取所有保存的配置档案"""
+def load_profiles():
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            # 兼容旧格式：单套配置直接转
             if "app_id" in data:
-                name = data.get("name", "默认")
-                profiles = {name: data}
-                # 自动迁移为多配置格式
-                CONFIG_FILE.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
-                return profiles
+                return {"默认": data}
             return data
-        except Exception:
+        except:
             return {}
     return {}
 
+def save_profiles(p):
+    CONFIG_FILE.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def save_profile(name: str, data: dict):
-    """保存一套配置档案"""
-    profiles = load_all_profiles()
-    profiles[name] = {
-        "name": name,
-        "app_id": data.get("app_id", ""),
-        "app_secret": data.get("app_secret", ""),
-        "app_token": data.get("app_token", ""),
-        "table_id": data.get("table_id", "tblRWlmlvudYAruS"),
-    }
-    CONFIG_FILE.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def delete_profile(name: str):
-    """删除一套配置档案"""
-    profiles = load_all_profiles()
-    profiles.pop(name, None)
-    CONFIG_FILE.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def get_active_config(profile_name: str | None = None):
-    """获取指定档案的配置，未指定则用第一个"""
-    profiles = load_all_profiles()
-    if profile_name and profile_name in profiles:
-        return profiles[profile_name]
-    # 取第一个
-    for name, cfg in profiles.items():
-        return cfg
-    # 都没有则用环境变量
-    return {
-        "name": "",
-        "app_id": os.getenv("FEISHU_APP_ID", ""),
-        "app_secret": os.getenv("FEISHU_APP_SECRET", ""),
-        "app_token": os.getenv("FEISHU_APP_TOKEN", ""),
-        "table_id": os.getenv("FEISHU_TABLE_ID", "tblRWlmlvudYAruS"),
-    }
-
-
-def get_feishu_service(profile_name: str | None = None):
-    """获取飞书服务实例"""
-    cfg = get_active_config(profile_name)
-    if not cfg.get("app_id") or not cfg.get("app_secret"):
-        return None
+def get_service(app_id, app_secret):
     try:
-        feishu_cfg = FeishuConfig(app_id=cfg["app_id"], app_secret=cfg["app_secret"])
-        client = FeishuClient(feishu_cfg)
-        return BitableService(client)
-    except Exception:
+        return BitableService(FeishuClient(FeishuConfig(app_id=app_id, app_secret=app_secret)))
+    except:
         return None
 
+# ═══════════════ ROUTES ═══════════════
 
-# ── HTML 模板 ──
+@app.route("/")
+def index():
+    return render_template_string(HTML)
+
+@app.route("/api/profiles")
+def api_profiles():
+    profiles = load_profiles()
+    result = {}
+    for name, cfg in profiles.items():
+        s = cfg.get("app_secret","")
+        result[name] = {
+            "name": name,
+            "app_id": cfg.get("app_id",""),
+            "app_secret": s[:4]+"****" if len(s)>4 else s,
+            "app_token": cfg.get("app_token",""),
+            "table_id": cfg.get("table_id","tblRWlmlvudYAruS"),
+        }
+    return jsonify(result)
+
+@app.route("/api/profiles", methods=["POST"])
+def api_save_profile():
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    aid = (data.get("app_id") or "").strip()
+    sec = (data.get("app_secret") or "").strip()
+    tok = (data.get("app_token") or "").strip()
+    tid = (data.get("table_id") or "").strip()
+    if not name or not aid or not sec or not tok:
+        return jsonify({"ok": False, "error": "请填写完整信息"})
+    profiles = load_profiles()
+    profiles[name] = {"name": name, "app_id": aid, "app_secret": sec, "app_token": tok, "table_id": tid or "tblRWlmlvudYAruS"}
+    save_profiles(profiles)
+    return jsonify({"ok": True})
+
+@app.route("/api/profiles", methods=["DELETE"])
+def api_delete_profile():
+    name = request.args.get("name","")
+    if not name: return jsonify({"ok": False})
+    profiles = load_profiles()
+    profiles.pop(name, None)
+    save_profiles(profiles)
+    return jsonify({"ok": True})
+
+@app.route("/api/test", methods=["POST"])
+def api_test():
+    data = request.get_json() or {}
+    srv = get_service(data.get("app_id",""), data.get("app_secret",""))
+    if not srv:
+        return jsonify({"ok": False, "error": "无法创建飞书连接"})
+    try:
+        srv.list_tables(data.get("app_token",""), page_size=1)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
+    if "files" not in request.files:
+        return jsonify({"error": "请选择CSV文件"})
+    files = request.files.getlist("files")
+    profile_name = request.form.get("profile","")
+    profiles = load_profiles()
+    if profile_name not in profiles:
+        return jsonify({"error": "请先选择飞书接口"})
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for f in files:
+        if not f.filename.endswith(".csv"):
+            continue
+        ts = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        fpath = UPLOAD_DIR / f"{ts}_{f.filename}"
+        f.save(str(fpath))
+        saved.append({"name": f.filename, "path": str(fpath), "size": fpath.stat().st_size})
+    return jsonify({"ok": True, "files": saved, "count": len(saved)})
+
+@app.route("/api/upload", methods=["DELETE"])
+def api_clear_uploads():
+    if UPLOAD_DIR.exists():
+        for f in UPLOAD_DIR.glob("*.csv"):
+            f.unlink()
+    return jsonify({"ok": True})
+
+@app.route("/api/preview", methods=["POST"])
+def api_preview():
+    data = request.get_json() or {}
+    profile_name = data.get("profile","")
+    file_paths = data.get("files", [])
+
+    profiles = load_profiles()
+    cfg = profiles.get(profile_name)
+    if not cfg:
+        return jsonify({"error": "飞书接口配置未找到"})
+
+    srv = get_service(cfg["app_id"], cfg["app_secret"])
+    if not srv:
+        return jsonify({"error": "飞书连接失败，请检查配置"})
+
+    # 合并所有CSV
+    all_rows = {}
+    total_csv_rows = 0
+    for fp in file_paths:
+        p = Path(fp)
+        if not p.exists():
+            return jsonify({"error": f"文件不存在: {p.name}"})
+        rows = read_csv_by_order(p)
+        for k, v in rows.items():
+            if k not in all_rows:
+                all_rows[k] = v
+        total_csv_rows += len(rows)
+
+    # Dry run
+    rules = load_rules(RULES_PATH)
+    status_lookup = build_status_lookup(rules)
+
+    config = CsvSyncConfig(
+        app_token=cfg["app_token"],
+        table_id=cfg["table_id"],
+        csv_path=Path(file_paths[0]) if file_paths else RULES_PATH,
+        rules_path=RULES_PATH,
+    )
+
+    result = sync_csv_to_bitable(srv, config, dry_run=True)
+    result.csv_rows = total_csv_rows
+
+    return jsonify(result.to_dict())
+
+@app.route("/api/execute", methods=["POST"])
+def api_execute():
+    data = request.get_json() or {}
+    profile_name = data.get("profile","")
+    file_paths = data.get("files", [])
+
+    profiles = load_profiles()
+    cfg = profiles.get(profile_name)
+    if not cfg:
+        return jsonify({"error": "飞书接口配置未找到"})
+
+    srv = get_service(cfg["app_id"], cfg["app_secret"])
+    if not srv:
+        return jsonify({"error": "飞书连接失败"})
+
+    # Merge CSVs
+    merged_path = UPLOAD_DIR / f"merged_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
+    headers = set()
+    all_rows = []
+    for fp in file_paths:
+        p = Path(fp)
+        if not p.exists(): continue
+        text = p.read_text(encoding="utf-8-sig", errors="replace")
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            headers.update(row.keys())
+            all_rows.append(row)
+
+    headers = sorted(headers)
+    with open(merged_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(all_rows)
+
+    config = CsvSyncConfig(
+        app_token=cfg["app_token"],
+        table_id=cfg["table_id"],
+        csv_path=merged_path,
+        rules_path=RULES_PATH,
+    )
+
+    result = sync_csv_to_bitable(srv, config, dry_run=False)
+    return jsonify(result.to_dict())
+
+
+# ═══════════════ HTML ═══════════════
+
 HTML = r"""
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TK + 飞书 管理后台</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { background: #f5f6fa; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-        .sidebar {
-            background: #1a1a2e;
-            min-height: 100vh;
-            padding-top: 20px;
-        }
-        .sidebar .nav-link {
-            color: #a0a0b8;
-            padding: 12px 20px;
-            border-radius: 8px;
-            margin: 2px 10px;
-            transition: all 0.2s;
-        }
-        .sidebar .nav-link:hover, .sidebar .nav-link.active {
-            color: #fff;
-            background: rgba(255,255,255,0.1);
-        }
-        .sidebar .brand {
-            color: #fff;
-            font-size: 1.1rem;
-            font-weight: 600;
-            padding: 0 20px 20px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-            margin-bottom: 15px;
-        }
-        .card {
-            border: none;
-            border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-        }
-        .main-content { padding: 30px; }
-        .page-title { margin-bottom: 25px; }
-        .page-title h2 { font-weight: 600; }
-        .upload-zone {
-            border: 2px dashed #ccc;
-            border-radius: 12px;
-            padding: 40px;
-            text-align: center;
-            background: #fff;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        .upload-zone:hover { border-color: #0d6efd; background: #f0f7ff; }
-        .upload-zone.dragover { border-color: #0d6efd; background: #e8f0fe; }
-        .result-box {
-            background: #fff;
-            border-radius: 12px;
-            padding: 20px;
-            margin-top: 20px;
-        }
-        .result-box pre {
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 8px;
-            max-height: 400px;
-            overflow: auto;
-        }
-        .image-box {
-            background: #fff;
-            border-radius: 12px;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-        .image-box img { max-width: 100%; height: auto; border-radius: 8px; }
-        .config-form label { font-weight: 500; }
-        .config-form .form-text { font-size: 0.8rem; }
-        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
-    </style>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>飞书寄样表同步</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+body{background:#f5f6fa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.steps{display:flex;justify-content:center;margin:20px 0 30px}
+.step{display:flex;align-items:center}
+.step-circle{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1rem;background:#dee2e6;color:#6c757d;transition:.3s}
+.step.active .step-circle{background:#0d6efd;color:#fff}
+.step.done .step-circle{background:#198754;color:#fff}
+.step-label{margin:0 8px;font-size:.82rem;color:#6c757d}
+.step.active .step-label{color:#0d6efd;font-weight:600}
+.step-line{width:50px;height:2px;background:#dee2e6;margin:0 8px}
+.step.done .step-line{background:#198754}
+.card{border:none;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.main-content{max-width:900px;margin:20px auto;padding:0 15px}
+.upload-zone{border:2px dashed #ccc;border-radius:12px;padding:25px;text-align:center;cursor:pointer;transition:.3s}
+.upload-zone:hover,.upload-zone.dragover{border-color:#0d6efd;background:#f0f7ff}
+.toast-container{position:fixed;top:20px;right:20px;z-index:9999}
+.profile-item{cursor:pointer;transition:.2s}
+.profile-item:hover{background:#f0f7ff}
+.file-row{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#f8f9fa;border-radius:8px;margin-bottom:6px}
+.stat-card{text-align:center;padding:15px}
+.stat-card .num{font-size:1.8rem;font-weight:700}
+.stat-card .lbl{color:#6c757d;font-size:.85rem}
+table td,table th{font-size:.85rem}
+</style>
 </head>
 <body>
-    <div class="toast-container" id="toastContainer"></div>
-    <div class="container-fluid">
-        <div class="row">
-            <!-- 侧边栏 -->
-            <div class="col-md-2 sidebar p-0 d-none d-md-block">
-                <div class="brand">📊 TK 后台</div>
-                <nav class="nav flex-column">
-                    <a class="nav-link active" href="#" onclick="return loadPage('dashboard')">🏠 首页</a>
-                    <a class="nav-link" href="#" onclick="return loadPage('feishu_tables')">📋 飞书表格</a>
-                    <a class="nav-link" href="#" onclick="return loadPage('feishu_records')">📝 寄样表记录</a>
-                    <a class="nav-link" href="#" onclick="return loadPage('feishu_sync')">🔄 CSV 同步</a>
-                    <a class="nav-link" href="#" onclick="return loadPage('feishu_config')">⚙️ 飞书配置</a>
-                </nav>
-            </div>
+<div class="toast-container" id="toastContainer"></div>
+<div class="main-content">
+<div class="text-center mt-3"><h4>📊 飞书寄样表同步</h4></div>
+<div class="steps">
+<div class="step active" id="step1"><div class="step-circle">1</div><div class="step-label">选择接口</div></div>
+<div class="step-line"></div>
+<div class="step" id="step2"><div class="step-circle">2</div><div class="step-label">上传CSV</div></div>
+<div class="step-line"></div>
+<div class="step" id="step3"><div class="step-circle">3</div><div class="step-label">预览</div></div>
+<div class="step-line"></div>
+<div class="step" id="step4"><div class="step-circle">4</div><div class="step-label">执行</div></div>
+</div>
+<div id="page"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let S={step:1,profile:null,csvFiles:[],preview:null};
+function toast(m,t){let d=document.getElementById('toastContainer'),c={success:'#198754',danger:'#dc3545',warning:'#ffc107',info:'#0dcaf0'},b=c[t]||c.info;let e=document.createElement('div');e.innerHTML=`<div style="background:${b};color:#fff;padding:10px 18px;border-radius:8px;margin-bottom:6px;box-shadow:0 2px 8px rgba(0,0,0,.15)">${m}</div>`;d.appendChild(e.firstElementChild);setTimeout(()=>{if(d.firstChild)d.removeChild(d.firstChild)},3000)}
+function setStep(n){S.step=n;for(let i=1;i<=4;i++){let s=document.getElementById('step'+i);s.classList.remove('active','done');if(i<n)s.classList.add('done');if(i===n)s.classList.add('active')}}
+async function api(url,opts){try{let r=await fetch(url,opts);return await r.json()}catch(e){return{error:e.message}}}
 
-            <!-- 主内容 -->
-            <div class="col-md-10 main-content" id="mainContent"></div>
-        </div>
-    </div>
+// ═══════════════ STEP 1: 选择接口 ═══════════════
+function showStep1(){
+setStep(1);
+api('/api/profiles').then(data=>{
+let html=`<div class="card p-4"><div class="d-flex justify-content-between align-items-center mb-3"><h5>已保存的飞书接口</h5><button class="btn btn-primary btn-sm" onclick="showNewProfile()">+ 新建</button></div>`;
+let names=Object.keys(data);
+if(names.length===0)html+=`<p class="text-muted">还没有保存的接口，请点击"新建"</p>`;
+else{
+html+=`<div class="list-group">`;
+names.forEach(n=>{
+let p=data[n];
+html+=`<div class="list-group-item profile-item" onclick="selectProfile('${n}')" style="cursor:pointer">
+<div class="d-flex justify-content-between align-items-center">
+<div><strong>${n}</strong><br><small class="text-muted">${p.app_id} | Token: ${(p.app_token||'').substring(0,15)}...</small></div>
+<button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation();deleteProfile('${n}')">删除</button>
+</div></div>`;
+});
+html+=`</div>`;
+}
+html+=`<div id="newProfileForm" style="display:none" class="mt-3 border-top pt-3"></div></div>`;
+document.getElementById('page').innerHTML=html;
+});
+}
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        function showToast(msg, type) {
-            const container = document.getElementById('toastContainer');
-            const colors = { success: '#198754', danger: '#dc3545', warning: '#ffc107', info: '#0dcaf0' };
-            const bg = colors[type] || colors.info;
-            const html = `<div style="background:${bg};color:#fff;padding:12px 20px;border-radius:8px;margin-bottom:8px;box-shadow:0 2px 8px rgba(0,0,0,0.15);min-width:250px">${msg}</div>`;
-            const el = document.createElement('div');
-            el.innerHTML = html;
-            container.appendChild(el.firstElementChild);
-            setTimeout(() => { if (container.firstChild) container.removeChild(container.firstChild); }, 3000);
-        }
+function showNewProfile(){
+let el=document.getElementById('newProfileForm');
+el.style.display='block';
+el.innerHTML=`
+<h6>新建飞书接口</h6>
+<div class="mb-2"><label class="form-label">接口名称 *</label><input class="form-control form-control-sm" id="npName" placeholder="例如：TK店铺A"></div>
+<div class="mb-2"><label class="form-label">App ID *</label><input class="form-control form-control-sm" id="npAppId"></div>
+<div class="mb-2"><label class="form-label">App Secret *</label><input type="password" class="form-control form-control-sm" id="npSecret"></div>
+<div class="mb-2"><label class="form-label">App Token *</label><input class="form-control form-control-sm" id="npToken" placeholder="多维表格token"></div>
+<div class="mb-2"><label class="form-label">Table ID</label><input class="form-control form-control-sm" id="npTableId" value="tblRWlmlvudYAruS"></div>
+<div class="d-flex gap-2">
+<button class="btn btn-sm btn-primary" onclick="saveProfile()">保存</button>
+<button class="btn btn-sm btn-outline-secondary" onclick="testProfile()">测试连接</button>
+<button class="btn btn-sm btn-outline-secondary" onclick="el.style.display='none'">取消</button>
+</div>
+<div id="testResult" class="mt-2"></div>`;
+}
 
-        let currentPage = 'dashboard';
-        function loadPage(page) {
-            currentPage = page;
-            const navLinks = document.querySelectorAll('.nav-link');
-            navLinks.forEach(l => l.classList.remove('active'));
-            if (event && event.target) event.target.classList.add('active');
-            else {
-                document.querySelectorAll('.nav-link').forEach(l => {
-                    if (l.getAttribute('onclick')?.includes(page)) l.classList.add('active');
-                });
-            }
-            const el = document.getElementById('mainContent');
-            switch(page) {
-                case 'dashboard': renderDashboard(el); break;
-                case 'feishu_tables': renderFeishuTables(el); break;
-                case 'feishu_records': renderFeishuRecords(el); break;
-                case 'feishu_sync': renderFeishuSync(el); break;
-                case 'feishu_config': renderFeishuConfig(el); break;
-            }
-            return false;
-        }
+async function saveProfile(){
+let n=document.getElementById('npName').value.trim();
+let d={name:n,app_id:document.getElementById('npAppId').value.trim(),app_secret:document.getElementById('npSecret').value.trim(),app_token:document.getElementById('npToken').value.trim(),table_id:document.getElementById('npTableId').value.trim()};
+if(!n||!d.app_id||!d.app_secret||!d.app_token){toast('请填写完整信息','warning');return}
+let r=await api('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+if(r.ok){toast('已保存: '+n,'success');showStep1()}else toast(r.error,'danger');
+}
 
-        // ═══════════════ 首页 ═══════════════
-        function renderDashboard(el) {
-            el.innerHTML = `
-                <div class="page-title">
-                    <h2>🏠 首页</h2>
-                    <p class="text-muted">TK 小工具 · 飞书寄样表管理</p>
-                </div>
-                <div class="image-box">
-                    <img src="{{ url_for('static', filename='show.png') }}" alt="展示图片">
-                </div>
-                <div class="row g-4 mt-2">
-                    <div class="col-md-4">
-                        <div class="card p-4 text-center">
-                            <h5>📋 飞书表格</h5>
-                            <p class="text-muted">查看飞书多维表格</p>
-                            <button class="btn btn-primary" onclick="loadPage('feishu_tables')">进入</button>
-                        </div>
-                    </div>
-                    <div class="col-md-4">
-                        <div class="card p-4 text-center">
-                            <h5>📝 寄样表记录</h5>
-                            <p class="text-muted">查看寄样表数据</p>
-                            <button class="btn btn-primary" onclick="loadPage('feishu_records')">进入</button>
-                        </div>
-                    </div>
-                    <div class="col-md-4">
-                        <div class="card p-4 text-center">
-                            <h5>🔄 CSV 同步</h5>
-                            <p class="text-muted">上传 CSV 同步物流状态</p>
-                            <button class="btn btn-primary" onclick="loadPage('feishu_sync')">进入</button>
-                        </div>
-                    </div>
-                </div>
-                <p class="text-muted mt-4"><small>服务器时间：{{ time }}</small></p>
-            `;
-        }
+async function testProfile(){
+let d={app_id:document.getElementById('npAppId').value.trim(),app_secret:document.getElementById('npSecret').value.trim(),app_token:document.getElementById('npToken').value.trim(),table_id:document.getElementById('npTableId').value.trim()};
+if(!d.app_id||!d.app_secret||!d.app_token){toast('请先填写信息','warning');return}
+document.getElementById('testResult').innerHTML='<span class="text-muted">测试中...</span>';
+let r=await api('/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+document.getElementById('testResult').innerHTML=r.ok?'<span class="text-success">✅ 连接成功</span>':'<span class="text-danger">❌ '+r.error+'</span>';
+}
 
-        // ═══════════════ 飞书表格列表 ═══════════════
-        function renderFeishuTables(el) {
-            el.innerHTML = `
-                <div class="page-title d-flex justify-content-between align-items-center">
-                    <div>
-                        <h2>📋 飞书多维表格</h2>
-                        <p class="text-muted">查看当前飞书账号下的数据表</p>
-                    </div>
-                    <button class="btn btn-primary btn-sm" onclick="loadFeishuTables()">🔄 刷新</button>
-                </div>
-                <div class="card p-3">
-                    <div id="tablesContent"><p class="text-muted">加载中...</p></div>
-                </div>
-            `;
-            loadFeishuTables();
-        }
+async function selectProfile(name){
+let r=await api('/api/profiles');
+let p=r[name];
+if(!p)return;
+S.profile=name;
+toast('已选择: '+name,'success');
+showStep2();
+}
 
-        async function loadFeishuTables() {
-            const el = document.getElementById('tablesContent');
-            if (!el) return;
-            el.innerHTML = '<p class="text-muted">加载中...</p>';
-            try {
-                const res = await fetch('/api/feishu/tables');
-                const data = await res.json();
-                if (data.error) {
-                    el.innerHTML = '<div class="alert alert-warning">' + data.error + '</div>';
-                    return;
-                }
-                const items = data.data?.items || [];
-                if (items.length === 0) {
-                    el.innerHTML = '<p class="text-muted">暂无数据表，请先配置飞书凭证</p>';
-                    return;
-                }
-                let html = '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>表名</th><th>表 ID</th></tr></thead><tbody>';
-                items.forEach(t => {
-                    html += '<tr><td>' + (t.name || '-') + '</td><td><code>' + (t.table_id || '-') + '</code></td></tr>';
-                });
-                html += '</tbody></table></div>';
-                el.innerHTML = html;
-            } catch(e) {
-                el.innerHTML = '<div class="alert alert-danger">加载失败: ' + e.message + '</div>';
-            }
-        }
+async function deleteProfile(name){
+if(!confirm('确定删除「'+name+'」？'))return;
+let r=await api('/api/profiles?name='+encodeURIComponent(name),{method:'DELETE'});
+if(r.ok){toast('已删除','success');showStep1()}
+}
 
-        // ═══════════════ 寄样表记录 ═══════════════
-        function renderFeishuRecords(el) {
-            el.innerHTML = `
-                <div class="page-title d-flex justify-content-between align-items-center">
-                    <div>
-                        <h2>📝 寄样表记录</h2>
-                        <p class="text-muted">查看寄样表中的数据</p>
-                    </div>
-                    <div>
-                        <input type="number" class="form-control form-control-sm d-inline-block w-auto" id="recordLimit" value="20" style="width:80px">
-                        <button class="btn btn-primary btn-sm" onclick="loadFeishuRecords()">🔄 加载</button>
-                    </div>
-                </div>
-                <div class="card p-3">
-                    <div id="recordsContent"><p class="text-muted">点击加载查看寄样表记录</p></div>
-                </div>
-            `;
-        }
+// ═══════════════ STEP 2: 上传CSV ═══════════════
+function showStep2(){
+if(!S.profile){showStep1();return}
+setStep(2);
+document.getElementById('page').innerHTML=`
+<div class="card p-4">
+<div class="d-flex justify-content-between align-items-center mb-3">
+<h5>📁 上传CSV文件</h5>
+<span class="badge bg-info">接口: ${S.profile}</span>
+</div>
+<div class="upload-zone" id="uploadZone" onclick="document.getElementById('csvInput').click()">
+<h5>📂 点击上传 CSV 文件</h5>
+<p class="text-muted">或将文件拖拽到此处 | 支持一次选多个</p>
+</div>
+<input type="file" id="csvInput" accept=".csv" multiple style="display:none" onchange="uploadFiles(this)">
+<div class="mt-3" id="fileList">${S.csvFiles.length===0?'<p class="text-muted">还没有上传文件</p>':renderFileList()}</div>
+<div class="d-flex gap-2 mt-3">
+<button class="btn btn-outline-secondary btn-sm" onclick="showStep1()">← 上一步</button>
+<button class="btn btn-primary btn-sm ms-auto" onclick="goPreview()" ${S.csvFiles.length===0?'disabled':''}>下一步：预览 →</button>
+</div>
+</div>`;
+setupDropZone();
+}
 
-        async function loadFeishuRecords() {
-            const el = document.getElementById('recordsContent');
-            if (!el) return;
-            const limit = document.getElementById('recordLimit')?.value || 20;
-            el.innerHTML = '<p class="text-muted">加载中...</p>';
-            try {
-                const res = await fetch('/api/feishu/records?page_size=' + limit);
-                const data = await res.json();
-                if (data.error) {
-                    el.innerHTML = '<div class="alert alert-warning">' + data.error + '</div>';
-                    return;
-                }
-                const items = data.items || [];
-                if (items.length === 0) {
-                    el.innerHTML = '<p class="text-muted">暂无记录</p>';
-                    return;
-                }
-                const fields = items[0].fields || {};
-                const headers = Object.keys(fields).slice(0, 10);
-                let html = '<div class="table-responsive"><table class="table table-sm table-hover"><thead><tr>';
-                headers.forEach(h => { html += '<th>' + h + '</th>'; });
-                html += '</tr></thead><tbody>';
-                items.forEach(item => {
-                    const f = item.fields || {};
-                    html += '<tr>';
-                    headers.forEach(h => {
-                        let val = f[h];
-                        if (val === null || val === undefined) val = '-';
-                        else if (typeof val === 'object') val = JSON.stringify(val).substring(0, 20);
-                        else val = String(val).substring(0, 30);
-                        html += '<td><small>' + val + '</small></td>';
-                    });
-                    html += '</tr>';
-                });
-                html += '</tbody></table></div>';
-                html += '<p class="text-muted">共 ' + data.total + ' 条记录，显示前 ' + items.length + ' 条</p>';
-                el.innerHTML = html;
-            } catch(e) {
-                el.innerHTML = '<div class="alert alert-danger">加载失败: ' + e.message + '</div>';
-            }
-        }
+function renderFileList(){
+return S.csvFiles.map((f,i)=>`
+<div class="file-row">
+<span>📄 ${f.name} <small class="text-muted">(${(f.size/1024).toFixed(1)} KB)</small></span>
+<button class="btn btn-sm btn-outline-danger" onclick="removeFile(${i})">✕</button>
+</div>`).join('');
+}
 
-        // ═══════════════ CSV 同步 ═══════════════
-        function renderFeishuSync(el) {
-            el.innerHTML = `
-                <div class="page-title">
-                    <h2>🔄 CSV 同步寄样表</h2>
-                    <p class="text-muted">上传 CSV 文件，自动更新飞书寄样表的签收状态</p>
-                </div>
-                <div class="card p-4">
-                    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('csvFile').click()">
-                        <h3>📁 点击上传 CSV 文件</h3>
-                        <p class="text-muted">或将文件拖拽到此处</p>
-                    </div>
-                    <input type="file" id="csvFile" accept=".csv" style="display:none" onchange="uploadCSV(this)">
-                    <div class="mt-3">
-                        <label class="me-3"><input type="checkbox" id="dryRun" checked> 预览模式（不修改飞书数据）</label>
-                    </div>
-                    <div id="syncResult" class="result-box" style="display:none"></div>
-                </div>
-            `;
-            const zone = document.getElementById('uploadZone');
-            if (zone) {
-                zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
-                zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-                zone.addEventListener('drop', e => {
-                    e.preventDefault();
-                    zone.classList.remove('dragover');
-                    if (e.dataTransfer.files.length > 0) {
-                        const file = e.dataTransfer.files[0];
-                        if (file.name.endsWith('.csv')) uploadCSVFile(file);
-                        else alert('请上传 CSV 文件');
-                    }
-                });
-            }
-        }
+function setupDropZone(){
+let z=document.getElementById('uploadZone');
+if(!z)return;
+z.addEventListener('dragover',e=>{e.preventDefault();z.classList.add('dragover')});
+z.addEventListener('dragleave',()=>z.classList.remove('dragover'));
+z.addEventListener('drop',e=>{e.preventDefault();z.classList.remove('dragover');if(e.dataTransfer.files.length>0)doUpload(e.dataTransfer.files)});
+}
 
-        function uploadCSV(input) {
-            if (input.files.length > 0) uploadCSVFile(input.files[0]);
-        }
+function uploadFiles(input){if(input.files.length>0)doUpload(input.files)}
 
-        async function uploadCSVFile(file) {
-            const resultEl = document.getElementById('syncResult');
-            resultEl.style.display = 'block';
-            resultEl.innerHTML = '<p>上传中...</p>';
-            const formData = new FormData();
-            formData.append('csv', file);
-            formData.append('dry_run', document.getElementById('dryRun').checked ? '1' : '0');
-            try {
-                const res = await fetch('/api/feishu/sync', { method: 'POST', body: formData });
-                const data = await res.json();
-                if (data.error) {
-                    resultEl.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
-                    return;
-                }
-                const mode = data.dry_run ? '🔍 预览模式' : '✅ 执行模式';
-                let html = '<h5>' + mode + '</h5>';
-                html += '<table class="table table-sm"><tr><td>CSV 行数</td><td>' + (data.csv_rows || 0) + '</td></tr>';
-                html += '<tr><td>匹配记录</td><td>' + (data.matched_records || 0) + '</td></tr>';
-                html += '<tr><td>计划更新</td><td>' + (data.planned_updates || 0) + '</td></tr>';
-                html += '<tr><td>已更新</td><td>' + (data.updated || 0) + '</td></tr>';
-                html += '<tr><td>错误</td><td>' + (data.errors?.length || 0) + '</td></tr></table>';
-                if (data.field_changes && Object.keys(data.field_changes).length > 0) {
-                    html += '<h6>字段变更统计：</h6><ul>';
-                    for (const [k, v] of Object.entries(data.field_changes)) html += '<li>' + k + ': ' + v + ' 次</li>';
-                    html += '</ul>';
-                }
-                if (data.status_changes && Object.keys(data.status_changes).length > 0) {
-                    html += '<h6>签收状态变更：</h6><ul>';
-                    for (const [k, v] of Object.entries(data.status_changes)) html += '<li>' + k + ': ' + v + ' 条</li>';
-                    html += '</ul>';
-                }
-                if (data.errors && data.errors.length > 0) {
-                    html += '<h6 class="text-danger">错误详情：</h6><pre>' + JSON.stringify(data.errors, null, 2) + '</pre>';
-                }
-                resultEl.innerHTML = html;
-            } catch(e) {
-                resultEl.innerHTML = '<div class="alert alert-danger">同步失败: ' + e.message + '</div>';
-            }
-        }
+async function doUpload(files){
+let fd=new FormData();
+for(let f of files){if(f.name.endsWith('.csv'))fd.append('files',f)}
+fd.append('profile',S.profile);
+let r=await api('/api/upload',{method:'POST',body:fd});
+if(r.error){toast(r.error,'danger');return}
+if(r.files)S.csvFiles=[...S.csvFiles,...r.files];
+toast(`已上传 ${r.count} 个文件`,'success');
+showStep2();
+}
 
-        // ═══════════════ 飞书配置（多套配置） ═══════════════
-        let configProfiles = {};
-        let currentProfileName = '';
+function removeFile(i){S.csvFiles.splice(i,1);showStep2()}
 
-        function renderFeishuConfig(el) {
-            el.innerHTML = `
-                <div class="page-title d-flex justify-content-between align-items-center">
-                    <div>
-                        <h2>⚙️ 飞书配置</h2>
-                        <p class="text-muted">管理多套飞书 API 凭证</p>
-                    </div>
-                    <div>
-                        <button class="btn btn-outline-info btn-sm" onclick="showProfileSelector()">📂 加载配置</button>
-                        <button class="btn btn-outline-danger btn-sm ms-1" onclick="deleteCurrentProfile()">🗑️ 删除</button>
-                    </div>
-                </div>
-                <div class="card p-4">
-                    <div class="mb-3">
-                        <label>配置名称 <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" id="cfgName" placeholder="例如：TK店铺A、TK店铺B" value="默认">
-                        <div class="form-text">给这套配置起个名字，方便以后切换</div>
-                    </div>
-                    <form class="config-form" onsubmit="return saveFeishuConfig()">
-                        <div class="mb-3">
-                            <label>FEISHU_APP_ID <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control" id="cfgAppId" placeholder="飞书应用的 App ID" required>
-                            <div class="form-text">飞书开放平台 → 应用 → 凭证与基础信息</div>
-                        </div>
-                        <div class="mb-3">
-                            <label>FEISHU_APP_SECRET <span class="text-danger">*</span></label>
-                            <input type="password" class="form-control" id="cfgAppSecret" placeholder="飞书应用的 App Secret" required>
-                            <div class="form-text">飞书开放平台 → 应用 → 凭证与基础信息</div>
-                        </div>
-                        <div class="mb-3">
-                            <label>FEISHU_APP_TOKEN <span class="text-danger">*</span></label>
-                            <input type="text" class="form-control" id="cfgAppToken" placeholder="多维表格的 app_token" required>
-                            <div class="form-text">打开寄样表 → URL 中 /base/ 后面的那串字符</div>
-                        </div>
-                        <div class="mb-3">
-                            <label>FEISHU_TABLE_ID</label>
-                            <input type="text" class="form-control" id="cfgTableId" placeholder="寄样表的 table_id" value="tblRWlmlvudYAruS">
-                            <div class="form-text">默认已填写，一般不需要改</div>
-                        </div>
-                        <div class="d-flex gap-2">
-                            <button type="submit" class="btn btn-primary">💾 保存配置</button>
-                            <button type="button" class="btn btn-outline-secondary" onclick="testFeishuConfig()">🔍 测试连接</button>
-                        </div>
-                    </form>
-                    <div id="configStatus" class="mt-3"></div>
-                </div>
-            `;
-            loadProfileList();
-        }
+// ═══════════════ STEP 3: 预览 ═══════════════
+async function goPreview(){
+if(S.csvFiles.length===0){toast('请先上传CSV文件','warning');return}
+setStep(3);
+document.getElementById('page').innerHTML=`<div class="card p-4 text-center"><div class="spinner-border text-primary"></div><p class="mt-2">正在预览...</p></div>`;
 
-        async function loadProfileList() {
-            try {
-                const res = await fetch('/api/feishu/profiles');
-                configProfiles = await res.json();
-            } catch(e) {}
-        }
+let r=await api('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:S.profile,files:S.csvFiles.map(f=>f.path)})});
+S.preview=r;
 
-        function showProfileSelector() {
-            const names = Object.keys(configProfiles);
-            if (names.length === 0) {
-                showToast('没有已保存的配置', 'warning');
-                return;
-            }
-            let html = '<div class="list-group">';
-            names.forEach(name => {
-                const p = configProfiles[name];
-                const masked = p.app_secret ? p.app_secret.substring(0, 4) + '****' : '';
-                html += '<button class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" onclick="applyProfile(\'' + name + '\')">';
-                html += '<div><strong>' + name + '</strong><br><small class="text-muted">' + p.app_id + ' | ' + masked + '</small></div>';
-                html += '<span class="badge bg-primary rounded-pill">加载</span></button>';
-            });
-            html += '</div>';
+let html=`<div class="card p-4"><div class="d-flex justify-content-between align-items-center mb-3"><h5>🔍 预览结果</h5><span class="badge bg-info">接口: ${S.profile}</span></div>`;
 
-            const el = document.getElementById('configStatus');
-            el.innerHTML = '<div class="card p-3"><h6>选择要加载的配置：</h6>' + html + '</div>';
-        }
+if(r.error){html+=`<div class="alert alert-warning">${r.error}</div>`}
+else{
+html+=`<div class="row g-3 mb-3">`;
+html+=stat('CSV 行数',r.csv_rows||0,'#6c757d');
+html+=stat('匹配记录',r.matched_records||0,'#0d6efd');
+html+=stat('待更新',r.planned_updates||0,'#ffc107');
+html+=stat('异常状态',(r.unknown_statuses?Object.keys(r.unknown_statuses).length:0)||0,'#dc3545');
+html+=`</div>`;
 
-        function applyProfile(name) {
-            const p = configProfiles[name];
-            if (!p) return;
-            document.getElementById('cfgName').value = name;
-            document.getElementById('cfgAppId').value = p.app_id || '';
-            document.getElementById('cfgAppSecret').value = p.app_secret || '';
-            document.getElementById('cfgAppToken').value = p.app_token || '';
-            document.getElementById('cfgTableId').value = p.table_id || 'tblRWlmlvudYAruS';
-            currentProfileName = name;
-            document.getElementById('configStatus').innerHTML = '<div class="alert alert-success">✅ 已加载配置: ' + name + '</div>';
-            showToast('已加载: ' + name, 'success');
-        }
+if(r.field_changes&&Object.keys(r.field_changes).length>0){
+html+=`<h6>字段变更统计</h6><table class="table table-sm"><thead><tr><th>字段</th><th>变更数</th></tr></thead><tbody>`;
+for(let[k,v]of Object.entries(r.field_changes))html+=`<tr><td>${k}</td><td>${v}</td></tr>`;
+html+=`</tbody></table>`;
+}
+if(r.status_changes&&Object.keys(r.status_changes).length>0){
+html+=`<h6>签收状态变更</h6><table class="table table-sm"><thead><tr><th>状态</th><th>变更数</th></tr></thead><tbody>`;
+for(let[k,v]of Object.entries(r.status_changes))html+=`<tr><td>${k}</td><td>${v}</td></tr>`;
+html+=`</tbody></table>`;
+}
+if(r.unknown_statuses&&Object.keys(r.unknown_statuses).length>0){
+html+=`<h6 class="text-danger">未知状态</h6><table class="table table-sm"><thead><tr><th>状态</th><th>出现次数</th></tr></thead><tbody>`;
+for(let[k,v]of Object.entries(r.unknown_statuses))html+=`<tr><td>${k}</td><td>${v}</td></tr>`;
+html+=`</tbody></table>`;
+}
+if(!r.field_changes&&!r.status_changes&&!r.unknown_statuses)html+=`<p class="text-muted">没有需要更新的内容</p>`;
+}
 
-        async function saveFeishuConfig() {
-            const name = document.getElementById('cfgName').value.trim();
-            const data = {
-                app_id: document.getElementById('cfgAppId').value.trim(),
-                app_secret: document.getElementById('cfgAppSecret').value.trim(),
-                app_token: document.getElementById('cfgAppToken').value.trim(),
-                table_id: document.getElementById('cfgTableId').value.trim(),
-            };
-            if (!name) { showToast('请输入配置名称', 'warning'); return false; }
-            if (!data.app_id || !data.app_secret || !data.app_token) {
-                showToast('请填写必填字段', 'warning');
-                return false;
-            }
-            try {
-                const res = await fetch('/api/feishu/config', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: name, ...data }),
-                });
-                const result = await res.json();
-                if (result.ok) {
-                    showToast('✅ 配置已保存: ' + name, 'success');
-                    await loadProfileList();
-                } else {
-                    showToast('保存失败: ' + (result.error || '未知错误'), 'danger');
-                }
-            } catch(e) {
-                showToast('保存失败: ' + e.message, 'danger');
-            }
-            return false;
-        }
+html+=`<div class="d-flex gap-2 mt-3">
+<button class="btn btn-outline-secondary btn-sm" onclick="showStep2()">← 上一步</button>
+<button class="btn btn-success btn-sm ms-auto" onclick="goExecute()" ${!r.planned_updates?'disabled':''}>执行更新 →</button>
+</div></div>`;
 
-        async function deleteCurrentProfile() {
-            const name = document.getElementById('cfgName').value.trim();
-            if (!name || !configProfiles[name]) {
-                showToast('当前配置不存在或未保存', 'warning');
-                return;
-            }
-            if (!confirm('确定删除配置「' + name + '」吗？')) return;
-            try {
-                const res = await fetch('/api/feishu/config?name=' + encodeURIComponent(name), { method: 'DELETE' });
-                const result = await res.json();
-                if (result.ok) {
-                    showToast('已删除: ' + name, 'success');
-                    await loadProfileList();
-                    document.getElementById('configStatus').innerHTML = '';
-                }
-            } catch(e) {
-                showToast('删除失败: ' + e.message, 'danger');
-            }
-        }
+document.getElementById('page').innerHTML=html;
+}
+function stat(lbl,num,color){return `<div class="col-3"><div class="stat-card card p-2"><div class="num" style="color:${color}">${num}</div><div class="lbl">${lbl}</div></div></div>`}
 
-        async function testFeishuConfig() {
-            const el = document.getElementById('configStatus');
-            const app_id = document.getElementById('cfgAppId').value.trim();
-            const app_secret = document.getElementById('cfgAppSecret').value.trim();
-            const app_token = document.getElementById('cfgAppToken').value.trim();
-            const table_id = document.getElementById('cfgTableId').value.trim();
-            if (!app_id || !app_secret || !app_token) {
-                showToast('请先填写 App ID、Secret 和 Token', 'warning');
-                return;
-            }
-            el.innerHTML = '<p>测试连接中...</p>';
-            try {
-                const res = await fetch('/api/feishu/check', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ app_id, app_secret, app_token, table_id }),
-                });
-                const data = await res.json();
-                if (data.ok) {
-                    el.innerHTML = '<div class="alert alert-success">✅ 连接成功！飞书配置正常</div>';
-                } else {
-                    el.innerHTML = '<div class="alert alert-warning">⚠️ ' + (data.error || '连接失败') + '</div>';
-                }
-            } catch(e) {
-                el.innerHTML = '<div class="alert alert-danger">测试失败: ' + e.message + '</div>';
-            }
-        }
+// ═══════════════ STEP 4: 执行 ═══════════════
+async function goExecute(){
+setStep(4);
+document.getElementById('page').innerHTML=`<div class="card p-4"><h5>⚠️ 确认执行</h5>
+<p>将更新 <strong>${S.preview.planned_updates}</strong> 条记录到飞书寄样表。</p>
+<p class="text-danger">此操作不可撤销！</p>
+<div class="mb-3"><label><input type="checkbox" id="confirmExec"> 我确认要执行更新</label></div>
+<div class="d-flex gap-2">
+<button class="btn btn-outline-secondary btn-sm" onclick="goPreview()">← 返回预览</button>
+<button class="btn btn-danger btn-sm ms-auto" id="execBtn" onclick="doExecute()" disabled>执行更新</button>
+</div>
+<div id="execResult" class="mt-3"></div></div>`;
 
-        document.addEventListener('DOMContentLoaded', () => renderDashboard(document.getElementById('mainContent')));
-    </script>
+document.getElementById('confirmExec').addEventListener('change',function(){
+document.getElementById('execBtn').disabled=!this.checked;
+});
+}
+
+async function doExecute(){
+document.getElementById('execResult').innerHTML='<div class="text-center"><div class="spinner-border spinner-border-sm"></div> 正在执行...</div>';
+let r=await api('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:S.profile,files:S.csvFiles.map(f=>f.path)})});
+let html='';
+if(r.error)html=`<div class="alert alert-danger">${r.error}</div>`;
+else{
+html=`<div class="alert alert-success">✅ 执行完成</div>`;
+html+=`<table class="table table-sm"><tr><td>更新成功</td><td><strong>${r.updated||0}</strong></td></tr>`;
+html+=`<tr><td>错误</td><td>${(r.errors||[]).length}</td></tr></table>`;
+if(r.errors&&r.errors.length>0){html+=`<h6 class="text-danger">错误详情:</h6><pre class="small" style="max-height:200px;overflow:auto">${JSON.stringify(r.errors.slice(0,20),null,2)}</pre>`}
+}
+document.getElementById('execResult').innerHTML=html;
+toast(r.error?'执行失败':'执行完成','success');
+}
+
+// Start
+document.addEventListener('DOMContentLoaded',showStep1);
+</script>
 </body>
 </html>
 """
-
-
-# ── 页面路由 ──
-
-@app.route("/")
-def index():
-    return render_template_string(HTML, time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-
-
-# ── 配置 API ──
-
-@app.route("/api/feishu/profiles")
-def api_list_profiles():
-    """列出所有已保存的配置档案"""
-    profiles = load_all_profiles()
-    # 隐藏 secret 中间部分
-    result = {}
-    for name, cfg in profiles.items():
-        secret = cfg.get("app_secret", "")
-        if len(secret) > 8:
-            masked = secret[:4] + "****" + secret[-4:]
-        else:
-            masked = secret[:2] + "****" if secret else ""
-        result[name] = {
-            "name": name,
-            "app_id": cfg.get("app_id", ""),
-            "app_secret": masked,
-            "app_token": cfg.get("app_token", ""),
-            "table_id": cfg.get("table_id", ""),
-        }
-    return jsonify(result)
-
-
-@app.route("/api/feishu/config", methods=["GET"])
-def api_get_feishu_config():
-    """获取指定配置（含完整 secret，用于加载）"""
-    name = request.args.get("name", "")
-    profiles = load_all_profiles()
-    if name and name in profiles:
-        return jsonify(profiles[name])
-    # 取第一个
-    for n, cfg in profiles.items():
-        return jsonify(cfg)
-    return jsonify({})
-
-
-@app.route("/api/feishu/config", methods=["POST"])
-def api_save_feishu_config():
-    """保存飞书配置"""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"ok": False, "error": "无效的请求数据"})
-
-        name = (data.get("name") or "默认").strip()
-        app_id = (data.get("app_id") or "").strip()
-        app_secret = (data.get("app_secret") or "").strip()
-        app_token = (data.get("app_token") or "").strip()
-        table_id = (data.get("table_id") or "").strip()
-
-        if not app_id or not app_secret or not app_token:
-            return jsonify({"ok": False, "error": "App ID、App Secret、App Token 为必填项"})
-
-        save_profile(name, {
-            "app_id": app_id,
-            "app_secret": app_secret,
-            "app_token": app_token,
-            "table_id": table_id or "tblRWlmlvudYAruS",
-        })
-
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
-
-
-@app.route("/api/feishu/config", methods=["DELETE"])
-def api_delete_feishu_config():
-    """删除一套配置"""
-    name = request.args.get("name", "")
-    if not name:
-        return jsonify({"ok": False, "error": "缺少配置名称"})
-    delete_profile(name)
-    return jsonify({"ok": True})
-
-
-# ── 飞书 API ──
-
-@app.route("/api/feishu/check", methods=["GET", "POST"])
-def api_feishu_check():
-    """检查飞书配置"""
-    try:
-        if request.method == "POST":
-            # 用表单提交的配置测试
-            data = request.get_json() or {}
-            app_id = data.get("app_id", "")
-            app_secret = data.get("app_secret", "")
-            app_token = data.get("app_token", "")
-            table_id = data.get("table_id", "")
-            if not app_id or not app_secret or not app_token:
-                return jsonify({"ok": False, "error": "请填写 App ID、App Secret 和 App Token"})
-            feishu_cfg = FeishuConfig(app_id=app_id, app_secret=app_secret)
-            client = FeishuClient(feishu_cfg)
-            service = BitableService(client)
-            service.list_tables(app_token, page_size=1)
-            return jsonify({"ok": True})
-        
-        name = request.args.get("name", "")
-        service = get_feishu_service(name or None)
-        if not service:
-            return jsonify({"ok": False, "error": "飞书配置不完整，请填写 App ID 和 App Secret"})
-        cfg = get_active_config(name or None)
-        if not cfg.get("app_token"):
-            return jsonify({"ok": False, "error": "缺少 App Token"})
-        service.list_tables(cfg["app_token"], page_size=1)
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
-
-
-@app.route("/api/feishu/tables")
-def api_feishu_tables():
-    """获取飞书表格列表"""
-    try:
-        name = request.args.get("name", "")
-        service = get_feishu_service(name or None)
-        if not service:
-            return jsonify({"error": "飞书配置不完整"})
-        cfg = get_active_config(name or None)
-        if not cfg.get("app_token"):
-            return jsonify({"error": "缺少 App Token"})
-        result = service.list_tables(cfg["app_token"])
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-
-@app.route("/api/feishu/records")
-def api_feishu_records():
-    """获取寄样表记录"""
-    try:
-        name = request.args.get("name", "")
-        service = get_feishu_service(name or None)
-        if not service:
-            return jsonify({"error": "飞书配置不完整", "items": [], "total": 0})
-        cfg = get_active_config(name or None)
-        if not cfg.get("app_token") or not cfg.get("table_id"):
-            return jsonify({"error": "缺少 App Token 或 Table ID", "items": [], "total": 0})
-        page_size = request.args.get("page_size", 20, type=int)
-        result = service.list_records(cfg["app_token"], cfg["table_id"], page_size=page_size)
-        data = result.get("data") or {}
-        items = data.get("items") or []
-        total = data.get("total", 0)
-        return jsonify({"items": items, "total": total})
-    except Exception as e:
-        return jsonify({"error": str(e), "items": [], "total": 0})
-
-
-@app.route("/api/feishu/sync", methods=["POST"])
-def api_feishu_sync():
-    """上传 CSV 并同步寄样表"""
-    try:
-        if "csv" not in request.files:
-            return jsonify({"error": "请上传 CSV 文件"})
-
-        file = request.files["csv"]
-        if not file.filename.endswith(".csv"):
-            return jsonify({"error": "请上传 CSV 文件"})
-
-        dry_run = request.form.get("dry_run", "1") == "1"
-        profile_name = request.form.get("profile", "")
-
-        upload_dir = Path("/tmp/feishu_uploads")
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        csv_path = upload_dir / f"upload_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
-        file.save(str(csv_path))
-
-        service = get_feishu_service(profile_name or None)
-        if not service:
-            return jsonify({"error": "飞书配置不完整"})
-
-        cfg = get_active_config(profile_name or None)
-
-        from feishu.csv_sync import CsvSyncConfig, sync_csv_to_bitable
-
-        rules_path = Path(__file__).parent / "feishu" / "feishu_csv_update_rules.json"
-
-        sync_config = CsvSyncConfig(
-            app_token=cfg["app_token"],
-            table_id=cfg["table_id"],
-            csv_path=csv_path,
-            rules_path=rules_path,
-        )
-
-        result = sync_csv_to_bitable(service, sync_config, dry_run=dry_run)
-        return jsonify(result.to_dict())
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
