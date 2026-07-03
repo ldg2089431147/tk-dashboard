@@ -536,12 +536,8 @@ def index():
 
 @app.route("/api/feishu/config", methods=["GET"])
 def api_get_feishu_config():
-    """获取已保存的配置（隐藏部分 secret）"""
+    """获取已保存的配置"""
     cfg = get_feishu_config()
-    # 返回时隐藏部分 secret
-    secret = cfg.get("app_secret", "")
-    if len(secret) > 8:
-        cfg["app_secret"] = secret[:4] + "****" + secret[-4:]
     return jsonify(cfg)
 
 
