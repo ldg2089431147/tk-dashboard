@@ -164,68 +164,68 @@ def build_updates(
             page_size=config.page_size,
             field_names=needed_fields,
             filter_=filter_expr,
-    ):
-        fields = record.get("fields") or {}
-        row = csv_by_order.get(normalize(fields.get("订单ID")))
-        if not row:
-            continue
-
-        result.matched_records += 1
-        payload: dict[str, Any] = {}
-
-        for csv_field, target_field in rules["field_mapping"].items():
-            if target_field not in allowed or target_field == "签收状态" or target_field not in csv_source_fields:
-                continue
-            if target_field == "签收日期":
-                csv_text = date_only_text(row.get(csv_field) or "")
-                current_text = date_field_to_text(fields.get(target_field))
-                if current_text != csv_text:
-                    payload[target_field] = date_text_to_field(csv_text)
+        ):
+            fields = record.get("fields") or {}
+            row = csv_by_order.get(normalize(fields.get("订单ID")))
+            if not row:
                 continue
 
-            value = (row.get(csv_field) or "").strip()
-            if normalize(fields.get(target_field)) != value:
-                payload[target_field] = value
+            result.matched_records += 1
+            payload: dict[str, Any] = {}
 
-        raw_status = (row.get("Order Substatus") or "").strip()
-        mapped_status = status_lookup.get(raw_status)
-        if mapped_status:
-            current_status = normalize(fields.get("签收状态"))
-            video_link = normalize(fields.get("视频链接"))
-            desired_status = "已发布" if video_link else mapped_status
-            can_update_status = bool(video_link) or (not current_status) or current_status in overwritable
-            if can_update_status:
-                if current_status != desired_status:
-                    payload["签收状态"] = desired_status
-                    payload["查询日期"] = today_ms
-                    result.status_changes[desired_status] += 1
-            elif current_status != desired_status:
-                result.status_skipped_by_protection += 1
+            for csv_field, target_field in rules["field_mapping"].items():
+                if target_field not in allowed or target_field == "签收状态" or target_field not in csv_source_fields:
+                    continue
+                if target_field == "签收日期":
+                    csv_text = date_only_text(row.get(csv_field) or "")
+                    current_text = date_field_to_text(fields.get(target_field))
+                    if current_text != csv_text:
+                        payload[target_field] = date_text_to_field(csv_text)
+                    continue
 
-        payload = {key: value for key, value in payload.items() if key in allowed}
-        if payload:
-            record_id = record.get("record_id") or record.get("id")
-            if not record_id:
-                result.errors.append(("<unknown>", "记录缺少 record_id"))
-                continue
-            updates.append((record_id, payload))
-            for field_name in payload:
-                result.field_changes[field_name] += 1
+                value = (row.get(csv_field) or "").strip()
+                if normalize(fields.get(target_field)) != value:
+                    payload[target_field] = value
 
-            # 收集预览详情
-            detail = {
-                "record_id": record_id,
-                "order_id": normalize(fields.get("订单ID")),
-                "changes": {},
-            }
-            for field_name in payload:
-                old_val = fields.get(field_name)
-                new_val = payload[field_name]
-                detail["changes"][field_name] = {
-                    "old": format_preview_value(old_val),
-                    "new": format_preview_value(new_val),
+            raw_status = (row.get("Order Substatus") or "").strip()
+            mapped_status = status_lookup.get(raw_status)
+            if mapped_status:
+                current_status = normalize(fields.get("签收状态"))
+                video_link = normalize(fields.get("视频链接"))
+                desired_status = "已发布" if video_link else mapped_status
+                can_update_status = bool(video_link) or (not current_status) or current_status in overwritable
+                if can_update_status:
+                    if current_status != desired_status:
+                        payload["签收状态"] = desired_status
+                        payload["查询日期"] = today_ms
+                        result.status_changes[desired_status] += 1
+                elif current_status != desired_status:
+                    result.status_skipped_by_protection += 1
+
+            payload = {key: value for key, value in payload.items() if key in allowed}
+            if payload:
+                record_id = record.get("record_id") or record.get("id")
+                if not record_id:
+                    result.errors.append(("<unknown>", "记录缺少 record_id"))
+                    continue
+                updates.append((record_id, payload))
+                for field_name in payload:
+                    result.field_changes[field_name] += 1
+
+                # 收集预览详情
+                detail = {
+                    "record_id": record_id,
+                    "order_id": normalize(fields.get("订单ID")),
+                    "changes": {},
                 }
-            result.preview_details.append(detail)
+                for field_name in payload:
+                    old_val = fields.get(field_name)
+                    new_val = payload[field_name]
+                    detail["changes"][field_name] = {
+                        "old": format_preview_value(old_val),
+                        "new": format_preview_value(new_val),
+                    }
+                result.preview_details.append(detail)
 
     return updates
 
