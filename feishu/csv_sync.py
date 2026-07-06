@@ -40,6 +40,7 @@ class CsvSyncResult:
     status_skipped_by_protection: int = 0
     unknown_statuses: Counter[str] = field(default_factory=Counter)
     errors: list[tuple[str, str]] = field(default_factory=list)
+    preview_details: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +54,7 @@ class CsvSyncResult:
             "status_skipped_by_protection": self.status_skipped_by_protection,
             "unknown_statuses": dict(self.unknown_statuses),
             "errors": self.errors,
+            "preview_details": self.preview_details,
         }
 
 
@@ -197,6 +199,21 @@ def build_updates(
             for field_name in payload:
                 result.field_changes[field_name] += 1
 
+            # 收集预览详情
+            detail = {
+                "record_id": record_id,
+                "order_id": normalize(fields.get("订单ID")),
+                "changes": {},
+            }
+            for field_name in payload:
+                old_val = fields.get(field_name)
+                new_val = payload[field_name]
+                detail["changes"][field_name] = {
+                    "old": format_preview_value(old_val),
+                    "new": format_preview_value(new_val),
+                }
+            result.preview_details.append(detail)
+
     return updates
 
 
@@ -279,3 +296,24 @@ def today_midnight_ms(timezone: str) -> int:
     now = dt.datetime.now(tzinfo)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return int(midnight.timestamp() * 1000)
+
+
+def format_preview_value(value: Any) -> str:
+    """将飞书字段值转为可读文本"""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(item.get("text", str(item)))
+            else:
+                parts.append(str(item))
+        return ", ".join(parts)
+    if isinstance(value, (int, float)) and len(str(int(value))) == 13:
+        # 可能是时间戳（毫秒）
+        try:
+            return dt.datetime.fromtimestamp(int(value) / 1000, tz=dt.timezone.utc).strftime("%Y-%m-%d")
+        except:  # noqa: BLE001
+            pass
+    return str(value)
