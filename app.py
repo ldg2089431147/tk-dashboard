@@ -52,17 +52,13 @@ def index():
 @app.route("/api/profiles")
 def api_profiles():
     profiles = load_profiles()
-    name_filter = request.args.get("name", "")
     result = {}
     for name, cfg in profiles.items():
-        if name_filter and name != name_filter:
-            continue
         s = cfg.get("app_secret","")
         result[name] = {
             "name": name,
             "app_id": cfg.get("app_id",""),
             "app_secret": s[:4]+"****" if len(s)>4 else s,
-            "app_secret_full": s,
             "app_token": cfg.get("app_token",""),
             "table_id": cfg.get("table_id","tblRWlmlvudYAruS"),
         }
@@ -147,25 +143,18 @@ def api_preview():
     if not srv:
         return jsonify({"error": "飞书连接失败，请检查配置"})
 
-    # 合并所有CSV到临时文件（与 execute 保持一致的逻辑）
-    merged_path = UPLOAD_DIR / f"preview_merged_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.csv"
-    headers = set()
-    all_rows = []
+    # 合并所有CSV
+    all_rows = {}
+    total_csv_rows = 0
     for fp in file_paths:
         p = Path(fp)
         if not p.exists():
             return jsonify({"error": f"文件不存在: {p.name}"})
-        text = p.read_text(encoding="utf-8-sig", errors="replace")
-        reader = csv.DictReader(io.StringIO(text))
-        for row in reader:
-            headers.update(row.keys())
-            all_rows.append(row)
-
-    headers = sorted(headers)
-    with open(merged_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(all_rows)
+        rows = read_csv_by_order(p)
+        for k, v in rows.items():
+            if k not in all_rows:
+                all_rows[k] = v
+        total_csv_rows += len(rows)
 
     # Dry run
     rules = load_rules(RULES_PATH)
@@ -174,17 +163,12 @@ def api_preview():
     config = CsvSyncConfig(
         app_token=cfg["app_token"],
         table_id=cfg["table_id"],
-        csv_path=merged_path,
+        csv_path=Path(file_paths[0]) if file_paths else RULES_PATH,
         rules_path=RULES_PATH,
     )
 
     result = sync_csv_to_bitable(srv, config, dry_run=True)
-
-    # 清理临时文件
-    try:
-        merged_path.unlink()
-    except:
-        pass
+    result.csv_rows = total_csv_rows
 
     return jsonify(result.to_dict())
 
@@ -284,8 +268,7 @@ table td,table th{font-size:.85rem}
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-function escHtml(s){if(!s)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
-let S={step:1,profile:null,csvFiles:[],preview:null,editOriginalName:null};
+let S={step:1,profile:null,csvFiles:[],preview:null};
 function toast(m,t){let d=document.getElementById('toastContainer'),c={success:'#198754',danger:'#dc3545',warning:'#ffc107',info:'#0dcaf0'},b=c[t]||c.info;let e=document.createElement('div');e.innerHTML=`<div style="background:${b};color:#fff;padding:10px 18px;border-radius:8px;margin-bottom:6px;box-shadow:0 2px 8px rgba(0,0,0,.15)">${m}</div>`;d.appendChild(e.firstElementChild);setTimeout(()=>{if(d.firstChild)d.removeChild(d.firstChild)},3000)}
 function setStep(n){S.step=n;for(let i=1;i<=4;i++){let s=document.getElementById('step'+i);s.classList.remove('active','done');if(i<n)s.classList.add('done');if(i===n)s.classList.add('active')}}
 async function api(url,opts){try{let r=await fetch(url,opts);return await r.json()}catch(e){return{error:e.message}}}
@@ -304,10 +287,7 @@ let p=data[n];
 html+=`<div class="list-group-item profile-item" onclick="selectProfile('${n}')" style="cursor:pointer">
 <div class="d-flex justify-content-between align-items-center">
 <div><strong>${n}</strong><br><small class="text-muted">${p.app_id} | Token: ${(p.app_token||'').substring(0,15)}...</small></div>
-<div>
-<button class="btn btn-sm btn-outline-primary me-1" onclick="event.stopPropagation();editProfile('${n}')">✎ 编辑</button>
 <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation();deleteProfile('${n}')">删除</button>
-</div>
 </div></div>`;
 });
 html+=`</div>`;
@@ -318,7 +298,6 @@ document.getElementById('page').innerHTML=html;
 }
 
 function showNewProfile(){
-S.editOriginalName=null;
 let el=document.getElementById('newProfileForm');
 el.style.display='block';
 el.innerHTML=`
@@ -338,26 +317,10 @@ el.innerHTML=`
 
 async function saveProfile(){
 let n=document.getElementById('npName').value.trim();
-let sec=document.getElementById('npSecret').value.trim();
-let d={name:n,app_id:document.getElementById('npAppId').value.trim(),app_secret:sec,app_token:document.getElementById('npToken').value.trim(),table_id:document.getElementById('npTableId').value.trim()};
-if(!n||!d.app_id||!d.app_token){toast('请填写完整信息','warning');return}
-if(!sec&&S.editOriginalName){
-// 编辑时 secret 留空则保留原值
-let old=await api('/api/profiles?name='+encodeURIComponent(S.editOriginalName));
-let op=old[S.editOriginalName];
-if(op)d.app_secret=op.app_secret_full||'';
-}
-if(!d.app_secret){toast('请填写 App Secret','warning');return}
+let d={name:n,app_id:document.getElementById('npAppId').value.trim(),app_secret:document.getElementById('npSecret').value.trim(),app_token:document.getElementById('npToken').value.trim(),table_id:document.getElementById('npTableId').value.trim()};
+if(!n||!d.app_id||!d.app_secret||!d.app_token){toast('请填写完整信息','warning');return}
 let r=await api('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
-if(r.ok){
-// 如果改名了，删掉旧的
-if(S.editOriginalName&&S.editOriginalName!==n){
-await api('/api/profiles?name='+encodeURIComponent(S.editOriginalName),{method:'DELETE'});
-}
-S.editOriginalName=null;
-toast('已保存: '+n,'success');
-showStep1();
-}else toast(r.error,'danger');
+if(r.ok){toast('已保存: '+n,'success');showStep1()}else toast(r.error,'danger');
 }
 
 async function testProfile(){
@@ -381,29 +344,6 @@ async function deleteProfile(name){
 if(!confirm('确定删除「'+name+'」？'))return;
 let r=await api('/api/profiles?name='+encodeURIComponent(name),{method:'DELETE'});
 if(r.ok){toast('已删除','success');showStep1()}
-}
-
-async function editProfile(name){
-S.editOriginalName=name;
-let r=await api('/api/profiles?name='+encodeURIComponent(name));
-let p=r[name];
-if(!p){toast('未找到接口信息','danger');return}
-
-let el=document.getElementById('newProfileForm');
-el.style.display='block';
-el.innerHTML=`
-<h6>编辑飞书接口</h6>
-<div class="mb-2"><label class="form-label">接口名称 *</label><input class="form-control form-control-sm" id="npName" value="${escHtml(name)}"></div>
-<div class="mb-2"><label class="form-label">App ID *</label><input class="form-control form-control-sm" id="npAppId" value="${escHtml(p.app_id)}"></div>
-<div class="mb-2"><label class="form-label">App Secret *</label><input type="password" class="form-control form-control-sm" id="npSecret" value="${escHtml(p.app_secret_full||'')}" placeholder="留空则不修改"></div>
-<div class="mb-2"><label class="form-label">App Token *</label><input class="form-control form-control-sm" id="npToken" value="${escHtml(p.app_token)}"></div>
-<div class="mb-2"><label class="form-label">Table ID</label><input class="form-control form-control-sm" id="npTableId" value="${escHtml(p.table_id||'tblRWlmlvudYAruS')}"></div>
-<div class="d-flex gap-2">
-<button class="btn btn-sm btn-primary" onclick="saveProfile()">保存</button>
-<button class="btn btn-sm btn-outline-secondary" onclick="testProfile()">测试连接</button>
-<button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('newProfileForm').style.display='none';S.editOriginalName=null">取消</button>
-</div>
-<div id="testResult" class="mt-2"></div>`;
 }
 
 // ═══════════════ STEP 2: 上传CSV ═══════════════
@@ -496,24 +436,7 @@ html+=`<h6 class="text-danger">未知状态</h6><table class="table table-sm"><t
 for(let[k,v]of Object.entries(r.unknown_statuses))html+=`<tr><td>${k}</td><td>${v}</td></tr>`;
 html+=`</tbody></table>`;
 }
-
-// 详细变更列表
-if(r.preview_details&&r.preview_details.length>0){
-html+=`<h6 class="mt-3">📋 待更新记录详情 <small class="text-muted">(${r.preview_details.length} 条)</small></h6>`;
-html+=`<div style="max-height:500px;overflow-y:auto;border:1px solid #dee2e6;border-radius:8px">`;
-html+=`<table class="table table-sm table-hover mb-0"><thead style="position:sticky;top:0;background:#f8f9fa"><tr><th>订单ID</th><th>字段</th><th>旧值</th><th>→ 新值</th></tr></thead><tbody>`;
-for(let d of r.preview_details){
-let first=true;
-for(let[fld,chg]of Object.entries(d.changes)){
-let orderId=first?escHtml(d.order_id||d.record_id):'';
-html+=`<tr><td>${orderId}</td><td>${escHtml(fld)}</td><td style="color:#dc3545;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(chg.old)}">${escHtml(chg.old)||'<span class="text-muted">空</span>'}</td><td style="color:#198754;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(chg.new)}">${escHtml(chg.new)||'<span class="text-muted">空</span>'}</td></tr>`;
-first=false;
-}
-}
-html+=`</tbody></table></div>`;
-}
-
-if(!r.field_changes&&!r.status_changes&&!r.unknown_statuses&&(!r.preview_details||r.preview_details.length===0))html+=`<p class="text-muted">没有需要更新的内容</p>`;
+if(!r.field_changes&&!r.status_changes&&!r.unknown_statuses)html+=`<p class="text-muted">没有需要更新的内容</p>`;
 }
 
 html+=`<div class="d-flex gap-2 mt-3">
