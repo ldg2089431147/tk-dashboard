@@ -45,10 +45,6 @@ def get_service(app_id, app_secret):
 
 # ═══════════════ ROUTES ═══════════════
 
-@app.errorhandler(Exception)
-def handle_exception(e):
-    return jsonify({"error": str(e)}), 500
-
 @app.route("/")
 def index():
     return render_template_string(HTML)
@@ -182,10 +178,7 @@ def api_preview():
         rules_path=RULES_PATH,
     )
 
-    try:
-        result = sync_csv_to_bitable(srv, config, dry_run=True)
-    except Exception as e:
-        return jsonify({"error": str(e), "csv_rows": 0, "matched_records": 0, "planned_updates": 0, "preview_details": []})
+    result = sync_csv_to_bitable(srv, config, dry_run=True)
 
     # 清理临时文件
     try:
@@ -236,10 +229,7 @@ def api_execute():
         rules_path=RULES_PATH,
     )
 
-    try:
-        result = sync_csv_to_bitable(srv, config, dry_run=False)
-    except Exception as e:
-        return jsonify({"error": str(e), "updated": 0, "errors": [["<system>", str(e)]]})
+    result = sync_csv_to_bitable(srv, config, dry_run=False)
     return jsonify(result.to_dict())
 
 
