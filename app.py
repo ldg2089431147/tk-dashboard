@@ -148,7 +148,7 @@ def api_clear_uploads():
 def api_preview():
     data = request.get_json() or {}
     profile_name = data.get("profile","")
-    file_paths = data.get("files", [])
+    csv_files = data.get("files", [])  # [{name, content}, ...]
 
     profiles = load_profiles()
     cfg = profiles.get(profile_name)
@@ -159,32 +159,40 @@ def api_preview():
     if not srv:
         return jsonify({"error": "飞书连接失败，请检查配置"})
 
-    # 合并所有CSV
-    all_rows = {}
-    total_csv_rows = 0
-    for fp in file_paths:
-        p = Path(fp)
-        if not p.exists():
-            return jsonify({"error": f"文件不存在: {p.name}"})
-        rows = read_csv_by_order(p)
-        for k, v in rows.items():
-            if k not in all_rows:
-                all_rows[k] = v
-        total_csv_rows += len(rows)
+    # 合并所有CSV内容
+    merged_path = UPLOAD_DIR / f"preview_merged_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.csv"
+    headers = set()
+    all_rows = []
+    for cf in csv_files:
+        text = cf.get("content", "")
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            headers.update(row.keys())
+            all_rows.append(row)
 
-    # Dry run
+    headers = sorted(headers)
+    with open(merged_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(all_rows)
+
     rules = load_rules(RULES_PATH)
-    status_lookup = build_status_lookup(rules)
-
     config = CsvSyncConfig(
         app_token=cfg["app_token"],
         table_id=cfg["table_id"],
-        csv_path=Path(file_paths[0]) if file_paths else RULES_PATH,
+        csv_path=merged_path,
         rules_path=RULES_PATH,
     )
 
-    result = sync_csv_to_bitable(srv, config, dry_run=True)
-    result.csv_rows = total_csv_rows
+    try:
+        result = sync_csv_to_bitable(srv, config, dry_run=True)
+    except Exception as e:
+        return jsonify({"error": str(e), "csv_rows": 0, "matched_records": 0, "planned_updates": 0})
+
+    try:
+        merged_path.unlink()
+    except:
+        pass
 
     return jsonify(result.to_dict())
 
@@ -192,7 +200,7 @@ def api_preview():
 def api_execute():
     data = request.get_json() or {}
     profile_name = data.get("profile","")
-    file_paths = data.get("files", [])
+    csv_files = data.get("files", [])  # [{name, content}, ...]
 
     profiles = load_profiles()
     cfg = profiles.get(profile_name)
@@ -207,10 +215,8 @@ def api_execute():
     merged_path = UPLOAD_DIR / f"merged_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
     headers = set()
     all_rows = []
-    for fp in file_paths:
-        p = Path(fp)
-        if not p.exists(): continue
-        text = p.read_text(encoding="utf-8-sig", errors="replace")
+    for cf in csv_files:
+        text = cf.get("content", "")
         reader = csv.DictReader(io.StringIO(text))
         for row in reader:
             headers.update(row.keys())
@@ -229,7 +235,10 @@ def api_execute():
         rules_path=RULES_PATH,
     )
 
-    result = sync_csv_to_bitable(srv, config, dry_run=False)
+    try:
+        result = sync_csv_to_bitable(srv, config, dry_run=False)
+    except Exception as e:
+        return jsonify({"error": str(e), "updated": 0, "errors": [["<system>", str(e)]]})
     return jsonify(result.to_dict())
 
 
@@ -433,13 +442,19 @@ z.addEventListener('drop',e=>{e.preventDefault();z.classList.remove('dragover');
 function uploadFiles(input){if(input.files.length>0)doUpload(input.files)}
 
 async function doUpload(files){
-let fd=new FormData();
-for(let f of files){if(f.name.endsWith('.csv'))fd.append('files',f)}
-fd.append('profile',S.profile);
-let r=await api('/api/upload',{method:'POST',body:fd});
-if(r.error){toast(r.error,'danger');return}
-if(r.files)S.csvFiles=[...S.csvFiles,...r.files];
-toast(`已上传 ${r.count} 个文件`,'success');
+let newFiles=[];
+for(let f of files){
+if(!f.name.endsWith('.csv'))continue;
+if(S.csvFiles.some(ex=>ex.name===f.name)){toast(`跳过重复: ${f.name}`,'warning');continue}
+// 前端读取CSV内容，跳过上传保存步骤
+try{
+let text=await f.text();
+newFiles.push({name:f.name,size:f.size,content:text});
+}catch(e){toast(`读取失败: ${f.name}`,'danger')}
+}
+if(newFiles.length===0){toast('没有新文件','warning');return}
+S.csvFiles=[...S.csvFiles,...newFiles];
+toast(`已添加 ${newFiles.length} 个文件`,'success');
 showStep2();
 }
 
@@ -451,7 +466,7 @@ if(S.csvFiles.length===0){toast('请先上传CSV文件','warning');return}
 setStep(3);
 document.getElementById('page').innerHTML=`<div class="card p-4 text-center"><div class="spinner-border text-primary"></div><p class="mt-2">正在预览...</p></div>`;
 
-let r=await api('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:S.profile,files:S.csvFiles.map(f=>f.path)})});
+let r=await api('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:S.profile,files:S.csvFiles.map(f=>({name:f.name,content:f.content}))})});
 S.preview=r;
 
 let html=`<div class="card p-4"><div class="d-flex justify-content-between align-items-center mb-3"><h5>🔍 预览结果</h5><span class="badge bg-info">接口: ${S.profile}</span></div>`;
@@ -512,7 +527,7 @@ document.getElementById('execBtn').disabled=!this.checked;
 
 async function doExecute(){
 document.getElementById('execResult').innerHTML='<div class="text-center"><div class="spinner-border spinner-border-sm"></div> 正在执行...</div>';
-let r=await api('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:S.profile,files:S.csvFiles.map(f=>f.path)})});
+let r=await api('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:S.profile,files:S.csvFiles.map(f=>({name:f.name,content:f.content}))})});
 let html='';
 if(r.error)html=`<div class="alert alert-danger">${r.error}</div>`;
 else{
