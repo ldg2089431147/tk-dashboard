@@ -25,7 +25,7 @@ class CsvSyncConfig:
     rules_path: Path
     timezone: str = "Asia/Shanghai"
     page_size: int = 500
-    request_interval_seconds: float = 0.08
+    request_interval_seconds: float = 0.01
 
 
 @dataclass

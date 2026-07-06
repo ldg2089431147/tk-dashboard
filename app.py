@@ -52,13 +52,17 @@ def index():
 @app.route("/api/profiles")
 def api_profiles():
     profiles = load_profiles()
+    name_filter = request.args.get("name", "")
     result = {}
     for name, cfg in profiles.items():
+        if name_filter and name != name_filter:
+            continue
         s = cfg.get("app_secret","")
         result[name] = {
             "name": name,
             "app_id": cfg.get("app_id",""),
             "app_secret": s[:4]+"****" if len(s)>4 else s,
+            "app_secret_full": s,
             "app_token": cfg.get("app_token",""),
             "table_id": cfg.get("table_id","tblRWlmlvudYAruS"),
         }
@@ -72,9 +76,21 @@ def api_save_profile():
     sec = (data.get("app_secret") or "").strip()
     tok = (data.get("app_token") or "").strip()
     tid = (data.get("table_id") or "").strip()
-    if not name or not aid or not sec or not tok:
+    old_name = (data.get("old_name") or "").strip()
+    if not name or not aid or not tok:
         return jsonify({"ok": False, "error": "请填写完整信息"})
+    if not sec and old_name:
+        # 编辑时 secret 留空则保留原值
+        profiles = load_profiles()
+        old_cfg = profiles.get(old_name)
+        if old_cfg:
+            sec = old_cfg.get("app_secret", "")
+    if not sec:
+        return jsonify({"ok": False, "error": "请填写 App Secret"})
     profiles = load_profiles()
+    # 如果改名了，删掉旧的
+    if old_name and old_name != name and old_name in profiles:
+        del profiles[old_name]
     profiles[name] = {"name": name, "app_id": aid, "app_secret": sec, "app_token": tok, "table_id": tid or "tblRWlmlvudYAruS"}
     save_profiles(profiles)
     return jsonify({"ok": True})
@@ -268,7 +284,8 @@ table td,table th{font-size:.85rem}
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-let S={step:1,profile:null,csvFiles:[],preview:null};
+function escHtml(s){if(!s)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+let S={step:1,profile:null,csvFiles:[],preview:null,editOriginalName:null};
 function toast(m,t){let d=document.getElementById('toastContainer'),c={success:'#198754',danger:'#dc3545',warning:'#ffc107',info:'#0dcaf0'},b=c[t]||c.info;let e=document.createElement('div');e.innerHTML=`<div style="background:${b};color:#fff;padding:10px 18px;border-radius:8px;margin-bottom:6px;box-shadow:0 2px 8px rgba(0,0,0,.15)">${m}</div>`;d.appendChild(e.firstElementChild);setTimeout(()=>{if(d.firstChild)d.removeChild(d.firstChild)},3000)}
 function setStep(n){S.step=n;for(let i=1;i<=4;i++){let s=document.getElementById('step'+i);s.classList.remove('active','done');if(i<n)s.classList.add('done');if(i===n)s.classList.add('active')}}
 async function api(url,opts){try{let r=await fetch(url,opts);return await r.json()}catch(e){return{error:e.message}}}
@@ -287,7 +304,10 @@ let p=data[n];
 html+=`<div class="list-group-item profile-item" onclick="selectProfile('${n}')" style="cursor:pointer">
 <div class="d-flex justify-content-between align-items-center">
 <div><strong>${n}</strong><br><small class="text-muted">${p.app_id} | Token: ${(p.app_token||'').substring(0,15)}...</small></div>
+<div>
+<button class="btn btn-sm btn-outline-primary me-1" onclick="event.stopPropagation();editProfile('${n}')">✎ 编辑</button>
 <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation();deleteProfile('${n}')">删除</button>
+</div>
 </div></div>`;
 });
 html+=`</div>`;
@@ -298,6 +318,7 @@ document.getElementById('page').innerHTML=html;
 }
 
 function showNewProfile(){
+S.editOriginalName=null;
 let el=document.getElementById('newProfileForm');
 el.style.display='block';
 el.innerHTML=`
@@ -317,10 +338,10 @@ el.innerHTML=`
 
 async function saveProfile(){
 let n=document.getElementById('npName').value.trim();
-let d={name:n,app_id:document.getElementById('npAppId').value.trim(),app_secret:document.getElementById('npSecret').value.trim(),app_token:document.getElementById('npToken').value.trim(),table_id:document.getElementById('npTableId').value.trim()};
-if(!n||!d.app_id||!d.app_secret||!d.app_token){toast('请填写完整信息','warning');return}
+let d={name:n,old_name:S.editOriginalName||'',app_id:document.getElementById('npAppId').value.trim(),app_secret:document.getElementById('npSecret').value.trim(),app_token:document.getElementById('npToken').value.trim(),table_id:document.getElementById('npTableId').value.trim()};
+if(!n||!d.app_id||!d.app_token){toast('请填写完整信息','warning');return}
 let r=await api('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
-if(r.ok){toast('已保存: '+n,'success');showStep1()}else toast(r.error,'danger');
+if(r.ok){S.editOriginalName=null;toast('已保存: '+n,'success');showStep1()}else toast(r.error,'danger');
 }
 
 async function testProfile(){
@@ -344,6 +365,29 @@ async function deleteProfile(name){
 if(!confirm('确定删除「'+name+'」？'))return;
 let r=await api('/api/profiles?name='+encodeURIComponent(name),{method:'DELETE'});
 if(r.ok){toast('已删除','success');showStep1()}
+}
+
+async function editProfile(name){
+S.editOriginalName=name;
+let r=await api('/api/profiles?name='+encodeURIComponent(name));
+let p=r[name];
+if(!p){toast('未找到接口信息','danger');return}
+
+let el=document.getElementById('newProfileForm');
+el.style.display='block';
+el.innerHTML=`
+<h6>编辑飞书接口</h6>
+<div class="mb-2"><label class="form-label">接口名称 *</label><input class="form-control form-control-sm" id="npName" value="${escHtml(name)}"></div>
+<div class="mb-2"><label class="form-label">App ID *</label><input class="form-control form-control-sm" id="npAppId" value="${escHtml(p.app_id)}"></div>
+<div class="mb-2"><label class="form-label">App Secret *</label><input type="password" class="form-control form-control-sm" id="npSecret" value="${escHtml(p.app_secret_full||'')}" placeholder="留空则不修改"></div>
+<div class="mb-2"><label class="form-label">App Token *</label><input class="form-control form-control-sm" id="npToken" value="${escHtml(p.app_token)}"></div>
+<div class="mb-2"><label class="form-label">Table ID</label><input class="form-control form-control-sm" id="npTableId" value="${escHtml(p.table_id||'tblRWlmlvudYAruS')}"></div>
+<div class="d-flex gap-2">
+<button class="btn btn-sm btn-primary" onclick="saveProfile()">保存</button>
+<button class="btn btn-sm btn-outline-secondary" onclick="testProfile()">测试连接</button>
+<button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('newProfileForm').style.display='none';S.editOriginalName=null">取消</button>
+</div>
+<div id="testResult" class="mt-2"></div>`;
 }
 
 // ═══════════════ STEP 2: 上传CSV ═══════════════
