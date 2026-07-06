@@ -25,7 +25,7 @@ class CsvSyncConfig:
     rules_path: Path
     timezone: str = "Asia/Shanghai"
     page_size: int = 500
-    request_interval_seconds: float = 0.01
+    request_interval_seconds: float = 0.02
 
 
 @dataclass
@@ -147,77 +147,90 @@ def build_updates(
     needed_fields = list({"订单ID", "签收状态", "视频链接"} | allowed)
     updates: list[tuple[str, dict[str, Any]]] = []
 
-    # 全表扫描（page_size=500，通常1-2次API调用，比分批filter快得多）
-    for record in service.iter_all_records(
-        config.app_token,
-        config.table_id,
-        page_size=config.page_size,
-        field_names=needed_fields,
-    ):
-        fields = record.get("fields") or {}
-        oid = normalize(fields.get("订单ID"))
-        if not oid:
-            continue
-        row = csv_by_order.get(oid)
-        if not row:
-            continue
+    # 优先用 filter 按订单ID过滤查询（避免全表扫描）
+    # 飞书 filter 长度限制约 2000 字符，分批查询
+    csv_ids = list(csv_by_order.keys())
+    id_batch_size = 10
+    fetched_ids = set()
+    for batch_start in range(0, len(csv_ids), id_batch_size):
+        batch_ids = csv_ids[batch_start:batch_start + id_batch_size]
+        filter_expr = "OR(" + ",".join(
+            f'CurrentValue.[订单ID]="{eid}"'
+            for eid in batch_ids
+        ) + ")"
 
-        result.matched_records += 1
-        payload: dict[str, Any] = {}
-
-        for csv_field, target_field in rules["field_mapping"].items():
-            if target_field not in allowed or target_field == "签收状态" or target_field not in csv_source_fields:
+        for record in service.iter_all_records(
+            config.app_token,
+            config.table_id,
+            page_size=config.page_size,
+            field_names=needed_fields,
+            filter_=filter_expr,
+        ):
+            fields = record.get("fields") or {}
+            oid = normalize(fields.get("订单ID"))
+            if not oid or oid in fetched_ids:
                 continue
-            if target_field == "签收日期":
-                csv_text = date_only_text(row.get(csv_field) or "")
-                current_text = date_field_to_text(fields.get(target_field))
-                if current_text != csv_text:
-                    payload[target_field] = date_text_to_field(csv_text)
+            fetched_ids.add(oid)
+            row = csv_by_order.get(oid)
+            if not row:
                 continue
 
-            value = (row.get(csv_field) or "").strip()
-            if normalize(fields.get(target_field)) != value:
-                payload[target_field] = value
+            result.matched_records += 1
+            payload: dict[str, Any] = {}
 
-        raw_status = (row.get("Order Substatus") or "").strip()
-        mapped_status = status_lookup.get(raw_status)
-        if mapped_status:
-            current_status = normalize(fields.get("签收状态"))
-            video_link = normalize(fields.get("视频链接"))
-            desired_status = "已发布" if video_link else mapped_status
-            can_update_status = bool(video_link) or (not current_status) or current_status in overwritable
-            if can_update_status:
-                if current_status != desired_status:
-                    payload["签收状态"] = desired_status
-                    payload["查询日期"] = today_ms
-                    result.status_changes[desired_status] += 1
-            elif current_status != desired_status:
-                result.status_skipped_by_protection += 1
+            for csv_field, target_field in rules["field_mapping"].items():
+                if target_field not in allowed or target_field == "签收状态" or target_field not in csv_source_fields:
+                    continue
+                if target_field == "签收日期":
+                    csv_text = date_only_text(row.get(csv_field) or "")
+                    current_text = date_field_to_text(fields.get(target_field))
+                    if current_text != csv_text:
+                        payload[target_field] = date_text_to_field(csv_text)
+                    continue
 
-        payload = {key: value for key, value in payload.items() if key in allowed}
-        if payload:
-            record_id = record.get("record_id") or record.get("id")
-            if not record_id:
-                result.errors.append(("<unknown>", "记录缺少 record_id"))
-                continue
-            updates.append((record_id, payload))
-            for field_name in payload:
-                result.field_changes[field_name] += 1
+                value = (row.get(csv_field) or "").strip()
+                if normalize(fields.get(target_field)) != value:
+                    payload[target_field] = value
 
-            # 收集预览详情
-            detail = {
-                "record_id": record_id,
-                "order_id": oid,
-                "changes": {},
-            }
-            for field_name in payload:
-                old_val = fields.get(field_name)
-                new_val = payload[field_name]
-                detail["changes"][field_name] = {
-                    "old": format_preview_value(old_val),
-                    "new": format_preview_value(new_val),
+            raw_status = (row.get("Order Substatus") or "").strip()
+            mapped_status = status_lookup.get(raw_status)
+            if mapped_status:
+                current_status = normalize(fields.get("签收状态"))
+                video_link = normalize(fields.get("视频链接"))
+                desired_status = "已发布" if video_link else mapped_status
+                can_update_status = bool(video_link) or (not current_status) or current_status in overwritable
+                if can_update_status:
+                    if current_status != desired_status:
+                        payload["签收状态"] = desired_status
+                        payload["查询日期"] = today_ms
+                        result.status_changes[desired_status] += 1
+                elif current_status != desired_status:
+                    result.status_skipped_by_protection += 1
+
+            payload = {key: value for key, value in payload.items() if key in allowed}
+            if payload:
+                record_id = record.get("record_id") or record.get("id")
+                if not record_id:
+                    result.errors.append(("<unknown>", "记录缺少 record_id"))
+                    continue
+                updates.append((record_id, payload))
+                for field_name in payload:
+                    result.field_changes[field_name] += 1
+
+                # 收集预览详情
+                detail = {
+                    "record_id": record_id,
+                    "order_id": oid,
+                    "changes": {},
                 }
-            result.preview_details.append(detail)
+                for field_name in payload:
+                    old_val = fields.get(field_name)
+                    new_val = payload[field_name]
+                    detail["changes"][field_name] = {
+                        "old": format_preview_value(old_val),
+                        "new": format_preview_value(new_val),
+                    }
+                result.preview_details.append(detail)
 
     return updates
 
