@@ -147,10 +147,11 @@ def build_updates(
     needed_fields = list({"订单ID", "签收状态", "视频链接"} | allowed)
     updates: list[tuple[str, dict[str, Any]]] = []
 
-    # 只拉取 CSV 中存在的订单ID，避免全表扫描
+    # 优先用 filter 按订单ID过滤查询（避免全表扫描）
+    # 飞书 filter 长度限制约 2000 字符，分批查询
     csv_ids = list(csv_by_order.keys())
-    # 飞书 filter 有长度限制，分批查询
-    id_batch_size = 50
+    id_batch_size = 10
+    fetched_ids = set()
     for batch_start in range(0, len(csv_ids), id_batch_size):
         batch_ids = csv_ids[batch_start:batch_start + id_batch_size]
         filter_expr = "OR(" + ",".join(
@@ -166,7 +167,11 @@ def build_updates(
             filter_=filter_expr,
         ):
             fields = record.get("fields") or {}
-            row = csv_by_order.get(normalize(fields.get("订单ID")))
+            oid = normalize(fields.get("订单ID"))
+            if not oid or oid in fetched_ids:
+                continue
+            fetched_ids.add(oid)
+            row = csv_by_order.get(oid)
             if not row:
                 continue
 
@@ -215,7 +220,7 @@ def build_updates(
                 # 收集预览详情
                 detail = {
                     "record_id": record_id,
-                    "order_id": normalize(fields.get("订单ID")),
+                    "order_id": oid,
                     "changes": {},
                 }
                 for field_name in payload:
