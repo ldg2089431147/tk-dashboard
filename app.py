@@ -241,78 +241,130 @@ HTML = r"""
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>飞书寄样表同步</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
-body{background:#f5f6fa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.steps{display:flex;justify-content:center;margin:20px 0 30px}
-.step{display:flex;align-items:center}
-.step-circle{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1rem;background:#dee2e6;color:#6c757d;transition:.3s}
-.step.active .step-circle{background:#0d6efd;color:#fff}
-.step.done .step-circle{background:#198754;color:#fff}
-.step-label{margin:0 8px;font-size:.82rem;color:#6c757d}
-.step.active .step-label{color:#0d6efd;font-weight:600}
-.step-line{width:50px;height:2px;background:#dee2e6;margin:0 8px}
-.step.done .step-line{background:#198754}
-.card{border:none;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
-.main-content{max-width:900px;margin:20px auto;padding:0 15px}
-.upload-zone{border:2px dashed #ccc;border-radius:12px;padding:25px;text-align:center;cursor:pointer;transition:.3s}
-.upload-zone:hover,.upload-zone.dragover{border-color:#0d6efd;background:#f0f7ff}
-.toast-container{position:fixed;top:20px;right:20px;z-index:9999}
-.profile-item{cursor:pointer;transition:.2s}
-.profile-item:hover{background:#f0f7ff}
-.file-row{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#f8f9fa;border-radius:8px;margin-bottom:6px}
-.stat-card{text-align:center;padding:15px}
-.stat-card .num{font-size:1.8rem;font-weight:700}
-.stat-card .lbl{color:#6c757d;font-size:.85rem}
-table td,table th{font-size:.85rem}
+:root{--primary:#4f46e5;--primary-hover:#4338ca;--success:#10b981;--danger:#ef4444;--warning:#f59e0b;--bg:#f1f5f9;--card:#fff;--text:#1e293b;--muted:#94a3b8;--border:#e2e8f0;--radius:12px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;line-height:1.5;min-height:100vh}
+.main{max-width:880px;margin:0 auto;padding:24px 16px 60px}
+.header{text-align:center;padding:24px 0 8px}
+.header h1{font-size:1.35rem;font-weight:700;letter-spacing:-.3px}
+.header p{color:var(--muted);font-size:.85rem;margin-top:4px}
+.steps{display:flex;justify-content:center;align-items:center;gap:0;margin:24px 0 28px}
+.step{display:flex;align-items:center;gap:8px}
+.step-num{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:600;background:var(--border);color:var(--muted);transition:.25s}
+.step.active .step-num{background:var(--primary);color:#fff;box-shadow:0 2px 8px rgba(79,70,229,.3)}
+.step.done .step-num{background:var(--success);color:#fff}
+.step-label{font-size:.8rem;color:var(--muted);font-weight:500}
+.step.active .step-label{color:var(--primary)}
+.step.done .step-label{color:var(--success)}
+.step-line{width:40px;height:2px;background:var(--border);margin:0 8px}
+.step.done+.step-line{background:var(--success)}
+.card{background:var(--card);border-radius:var(--radius);box-shadow:0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);padding:24px;margin-bottom:16px}
+.card-title{font-size:1rem;font-weight:600;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between}
+.btn{display:inline-flex;align-items:center;gap:4px;padding:8px 16px;border-radius:8px;font-size:.85rem;font-weight:500;border:1px solid var(--border);background:var(--card);color:var(--text);cursor:pointer;transition:.15s;white-space:nowrap}
+.btn:hover{background:#f8fafc}
+.btn-primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.btn-primary:hover{background:var(--primary-hover)}
+.btn-success{background:var(--success);color:#fff;border-color:var(--success)}
+.btn-success:hover{background:#059669}
+.btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+.btn-danger:hover{background:#dc2626}
+.btn-sm{padding:5px 10px;font-size:.78rem}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.form-group{margin-bottom:12px}
+.form-label{display:block;font-size:.82rem;font-weight:500;margin-bottom:4px;color:var(--text)}
+.form-input{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:.85rem;outline:none;transition:.15s}
+.form-input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+.form-actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:32px 20px;text-align:center;cursor:pointer;transition:.2s}
+.upload-zone:hover,.upload-zone.dragover{border-color:var(--primary);background:#f8faff}
+.upload-zone-icon{font-size:2.2rem;margin-bottom:8px}
+.upload-zone-text{font-size:.9rem;font-weight:500}
+.upload-zone-hint{font-size:.8rem;color:var(--muted);margin-top:4px}
+.file-list{display:flex;flex-direction:column;gap:6px}
+.file-row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#f8fafc;border-radius:8px;font-size:.85rem;transition:.1s}
+.file-row:hover{background:#f1f5f9}
+.file-row-name{display:flex;align-items:center;gap:6px}
+.file-row-size{color:var(--muted);font-size:.78rem;margin-left:8px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:20px}
+.stat-card{text-align:center;padding:16px 10px;background:#f8fafc;border-radius:10px}
+.stat-num{font-size:1.6rem;font-weight:700;line-height:1.2}
+.stat-label{font-size:.78rem;color:var(--muted);margin-top:2px}
+.table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:10px;margin-top:12px}
+.table-wrap table{width:100%;border-collapse:collapse;font-size:.82rem}
+.table-wrap th{background:#f8fafc;padding:10px 12px;text-align:left;font-weight:600;position:sticky;top:0;z-index:1;border-bottom:1px solid var(--border)}
+.table-wrap td{padding:9px 12px;border-bottom:1px solid #f1f5f9}
+.table-wrap tr:last-child td{border-bottom:none}
+.table-wrap tr:hover td{background:#f8fafc}
+.old-val{color:var(--danger);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.new-val{color:var(--success);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toast-wrap{position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:6px}
+.toast{padding:10px 18px;border-radius:8px;color:#fff;font-size:.85rem;font-weight:500;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:slideIn .2s ease}
+@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+.toast-success{background:var(--success)}
+.toast-danger{background:var(--danger)}
+.toast-warning{background:var(--warning)}
+.toast-info{background:#6366f1}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:.75rem;font-weight:500;background:#eef2ff;color:var(--primary)}
+.loading{text-align:center;padding:40px 20px}
+.spinner{width:28px;height:28px;border:3px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin .6s linear infinite;margin:0 auto 12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.gap-2{display:flex;gap:8px;align-items:center}
+.mt-3{margin-top:16px}
+.mb-3{margin-bottom:16px}
+.ms-auto{margin-left:auto}
+.text-muted{color:var(--muted)}
+.text-danger{color:var(--danger)}
+.text-center{text-align:center}
+.flex-between{display:flex;justify-content:space-between;align-items:center}
+.empty-state{text-align:center;padding:24px;color:var(--muted);font-size:.88rem}
 </style>
 </head>
 <body>
-<div class="toast-container" id="toastContainer"></div>
-<div class="main-content">
-<div class="text-center mt-3"><h4>📊 飞书寄样表同步</h4></div>
+<div class="toast-wrap" id="toastContainer"></div>
+<div class="main">
+<div class="header"><h1>📊 飞书寄样表同步</h1><p>4步完成 CSV → 飞书寄样表更新</p></div>
 <div class="steps">
-<div class="step active" id="step1"><div class="step-circle">1</div><div class="step-label">选择接口</div></div>
+<div class="step active" id="step1"><div class="step-num">1</div><div class="step-label">选择接口</div></div>
 <div class="step-line"></div>
-<div class="step" id="step2"><div class="step-circle">2</div><div class="step-label">上传CSV</div></div>
+<div class="step" id="step2"><div class="step-num">2</div><div class="step-label">上传CSV</div></div>
 <div class="step-line"></div>
-<div class="step" id="step3"><div class="step-circle">3</div><div class="step-label">预览</div></div>
+<div class="step" id="step3"><div class="step-num">3</div><div class="step-label">预览</div></div>
 <div class="step-line"></div>
-<div class="step" id="step4"><div class="step-circle">4</div><div class="step-label">执行</div></div>
+<div class="step" id="step4"><div class="step-num">4</div><div class="step-label">执行</div></div>
 </div>
 <div id="page"></div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 function escHtml(s){if(!s)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 let S={step:1,profile:null,csvFiles:[],preview:null,editOriginalName:null};
-function toast(m,t){let d=document.getElementById('toastContainer'),c={success:'#198754',danger:'#dc3545',warning:'#ffc107',info:'#0dcaf0'},b=c[t]||c.info;let e=document.createElement('div');e.innerHTML=`<div style="background:${b};color:#fff;padding:10px 18px;border-radius:8px;margin-bottom:6px;box-shadow:0 2px 8px rgba(0,0,0,.15)">${m}</div>`;d.appendChild(e.firstElementChild);setTimeout(()=>{if(d.firstChild)d.removeChild(d.firstChild)},3000)}
+function toast(m,t){let d=document.getElementById('toastContainer');let e=document.createElement('div');e.className='toast toast-'+(t||'info');e.textContent=m;d.appendChild(e);setTimeout(()=>{if(d.firstChild)d.removeChild(d.firstChild)},3000)}
 function setStep(n){S.step=n;for(let i=1;i<=4;i++){let s=document.getElementById('step'+i);s.classList.remove('active','done');if(i<n)s.classList.add('done');if(i===n)s.classList.add('active')}}
+function showLoading(msg){return`<div class="loading"><div class="spinner"></div><p class="text-muted">${msg||'加载中...'}</p></div>`}
 async function api(url,opts){try{let r=await fetch(url,opts);return await r.json()}catch(e){return{error:e.message}}}
 
 // ═══════════════ STEP 1: 选择接口 ═══════════════
 function showStep1(){
 setStep(1);
 api('/api/profiles').then(data=>{
-let html=`<div class="card p-4"><div class="d-flex justify-content-between align-items-center mb-3"><h5>已保存的飞书接口</h5><button class="btn btn-primary btn-sm" onclick="showNewProfile()">+ 新建</button></div>`;
+let html=`<div class="card"><div class="card-title"><span>已保存的飞书接口</span><button class="btn btn-primary btn-sm" onclick="showNewProfile()">+ 新建</button></div>`;
 let names=Object.keys(data);
-if(names.length===0)html+=`<p class="text-muted">还没有保存的接口，请点击"新建"</p>`;
+if(names.length===0)html+=`<div class="empty-state">还没有保存的接口，点击上方「新建」添加</div>`;
 else{
-html+=`<div class="list-group">`;
+html+=`<div class="file-list">`;
 names.forEach(n=>{
 let p=data[n];
-html+=`<div class="list-group-item profile-item" onclick="selectProfile('${n}')" style="cursor:pointer">
-<div class="d-flex justify-content-between align-items-center">
-<div><strong>${n}</strong><br><small class="text-muted">${p.app_id} | Token: ${(p.app_token||'').substring(0,15)}...</small></div>
-<div>
-<button class="btn btn-sm btn-outline-primary me-1" onclick="event.stopPropagation();editProfile('${n}')">✎ 编辑</button>
-<button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation();deleteProfile('${n}')">删除</button>
+html+=`<div class="file-row" onclick="selectProfile('${n}')" style="cursor:pointer">
+<div class="file-row-name"><strong>${n}</strong><span class="file-row-size">${p.app_id} | ${(p.app_token||'').substring(0,12)}...</span></div>
+<div class="gap-2">
+<button class="btn btn-sm" onclick="event.stopPropagation();editProfile('${n}')">✎ 编辑</button>
+<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();deleteProfile('${n}')">删除</button>
 </div>
-</div></div>`;
+</div>`;
 });
 html+=`</div>`;
 }
-html+=`<div id="newProfileForm" style="display:none" class="mt-3 border-top pt-3"></div></div>`;
+html+=`<div id="newProfileForm" style="display:none" class="mt-3"></div></div>`;
 document.getElementById('page').innerHTML=html;
 });
 }
@@ -322,18 +374,17 @@ S.editOriginalName=null;
 let el=document.getElementById('newProfileForm');
 el.style.display='block';
 el.innerHTML=`
-<h6>新建飞书接口</h6>
-<div class="mb-2"><label class="form-label">接口名称 *</label><input class="form-control form-control-sm" id="npName" placeholder="例如：TK店铺A"></div>
-<div class="mb-2"><label class="form-label">App ID *</label><input class="form-control form-control-sm" id="npAppId"></div>
-<div class="mb-2"><label class="form-label">App Secret *</label><input type="password" class="form-control form-control-sm" id="npSecret"></div>
-<div class="mb-2"><label class="form-label">App Token *</label><input class="form-control form-control-sm" id="npToken" placeholder="多维表格token"></div>
-<div class="mb-2"><label class="form-label">Table ID</label><input class="form-control form-control-sm" id="npTableId" value="tblRWlmlvudYAruS"></div>
-<div class="d-flex gap-2">
-<button class="btn btn-sm btn-primary" onclick="saveProfile()">保存</button>
-<button class="btn btn-sm btn-outline-secondary" onclick="testProfile()">测试连接</button>
-<button class="btn btn-sm btn-outline-secondary" onclick="el.style.display='none'">取消</button>
+<div class="form-group"><label class="form-label">接口名称 *</label><input class="form-input" id="npName" placeholder="例如：TK店铺A"></div>
+<div class="form-group"><label class="form-label">App ID *</label><input class="form-input" id="npAppId"></div>
+<div class="form-group"><label class="form-label">App Secret *</label><input type="password" class="form-input" id="npSecret"></div>
+<div class="form-group"><label class="form-label">App Token *</label><input class="form-input" id="npToken" placeholder="多维表格token"></div>
+<div class="form-group"><label class="form-label">Table ID</label><input class="form-input" id="npTableId" value="tblRWlmlvudYAruS"></div>
+<div class="form-actions">
+<button class="btn btn-primary btn-sm" onclick="saveProfile()">保存</button>
+<button class="btn btn-sm" onclick="testProfile()">测试连接</button>
+<button class="btn btn-sm" onclick="el.style.display='none'">取消</button>
 </div>
-<div id="testResult" class="mt-2"></div>`;
+<div id="testResult" class="mt-3"></div>`;
 }
 
 async function saveProfile(){
@@ -392,18 +443,17 @@ if(!p){toast('未找到接口信息','danger');return}
 let el=document.getElementById('newProfileForm');
 el.style.display='block';
 el.innerHTML=`
-<h6>编辑飞书接口</h6>
-<div class="mb-2"><label class="form-label">接口名称 *</label><input class="form-control form-control-sm" id="npName" value="${escHtml(name)}"></div>
-<div class="mb-2"><label class="form-label">App ID *</label><input class="form-control form-control-sm" id="npAppId" value="${escHtml(p.app_id)}"></div>
-<div class="mb-2"><label class="form-label">App Secret *</label><input type="password" class="form-control form-control-sm" id="npSecret" value="${escHtml(p.app_secret_full||'')}" placeholder="留空则不修改"></div>
-<div class="mb-2"><label class="form-label">App Token *</label><input class="form-control form-control-sm" id="npToken" value="${escHtml(p.app_token)}"></div>
-<div class="mb-2"><label class="form-label">Table ID</label><input class="form-control form-control-sm" id="npTableId" value="${escHtml(p.table_id||'tblRWlmlvudYAruS')}"></div>
-<div class="d-flex gap-2">
-<button class="btn btn-sm btn-primary" onclick="saveProfile()">保存</button>
-<button class="btn btn-sm btn-outline-secondary" onclick="testProfile()">测试连接</button>
-<button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('newProfileForm').style.display='none';S.editOriginalName=null">取消</button>
+<div class="form-group"><label class="form-label">接口名称 *</label><input class="form-input" id="npName" value="${escHtml(name)}"></div>
+<div class="form-group"><label class="form-label">App ID *</label><input class="form-input" id="npAppId" value="${escHtml(p.app_id)}"></div>
+<div class="form-group"><label class="form-label">App Secret *</label><input type="password" class="form-input" id="npSecret" value="${escHtml(p.app_secret_full||'')}" placeholder="留空则不修改"></div>
+<div class="form-group"><label class="form-label">App Token *</label><input class="form-input" id="npToken" value="${escHtml(p.app_token)}"></div>
+<div class="form-group"><label class="form-label">Table ID</label><input class="form-input" id="npTableId" value="${escHtml(p.table_id||'tblRWlmlvudYAruS')}"></div>
+<div class="form-actions">
+<button class="btn btn-primary btn-sm" onclick="saveProfile()">保存</button>
+<button class="btn btn-sm" onclick="testProfile()">测试连接</button>
+<button class="btn btn-sm" onclick="document.getElementById('newProfileForm').style.display='none';S.editOriginalName=null">取消</button>
 </div>
-<div id="testResult" class="mt-2"></div>`;
+<div id="testResult" class="mt-3"></div>`;
 }
 
 // ═══════════════ STEP 2: 上传CSV ═══════════════
@@ -411,19 +461,20 @@ function showStep2(){
 if(!S.profile){showStep1();return}
 setStep(2);
 document.getElementById('page').innerHTML=`
-<div class="card p-4">
-<div class="d-flex justify-content-between align-items-center mb-3">
-<h5>📁 上传CSV文件</h5>
-<span class="badge bg-info">接口: ${S.profile}</span>
+<div class="card">
+<div class="card-title">
+<span>📁 上传CSV文件</span>
+<span class="badge">${S.profile}</span>
 </div>
 <div class="upload-zone" id="uploadZone" onclick="document.getElementById('csvInput').click()">
-<h5>📂 点击上传 CSV 文件</h5>
-<p class="text-muted">或将文件拖拽到此处 | 支持一次选多个</p>
+<div class="upload-zone-icon">📂</div>
+<div class="upload-zone-text">点击上传 CSV 文件</div>
+<div class="upload-zone-hint">或将文件拖拽到此处 · 支持一次选多个</div>
 </div>
 <input type="file" id="csvInput" accept=".csv" multiple style="display:none" onchange="uploadFiles(this)">
-<div class="mt-3" id="fileList">${S.csvFiles.length===0?'<p class="text-muted">还没有上传文件</p>':renderFileList()}</div>
-<div class="d-flex gap-2 mt-3">
-<button class="btn btn-outline-secondary btn-sm" onclick="showStep1()">← 上一步</button>
+<div class="mt-3" id="fileList">${S.csvFiles.length===0?'<div class="empty-state">还没有上传文件</div>':renderFileList()}</div>
+<div class="gap-2 mt-3">
+<button class="btn btn-sm" onclick="showStep1()">← 上一步</button>
 <button class="btn btn-primary btn-sm ms-auto" onclick="goPreview()" ${S.csvFiles.length===0?'disabled':''}>下一步：预览 →</button>
 </div>
 </div>`;
@@ -431,11 +482,11 @@ setupDropZone();
 }
 
 function renderFileList(){
-return S.csvFiles.map((f,i)=>`
+return `<div class="file-list">${S.csvFiles.map((f,i)=>`
 <div class="file-row">
-<span>📄 ${f.name} <small class="text-muted">(${(f.size/1024).toFixed(1)} KB)</small></span>
-<button class="btn btn-sm btn-outline-danger" onclick="removeFile(${i})">✕</button>
-</div>`).join('');
+<div class="file-row-name">📄 ${f.name}<span class="file-row-size">${(f.size/1024).toFixed(1)} KB</span></div>
+<button class="btn btn-sm btn-danger" onclick="removeFile(${i})">✕</button>
+</div>`).join('')}</div>`;
 }
 
 function setupDropZone(){
@@ -474,75 +525,73 @@ function removeFile(i){S.csvFiles.splice(i,1);showStep2()}
 async function goPreview(){
 if(S.csvFiles.length===0){toast('请先上传CSV文件','warning');return}
 setStep(3);
-document.getElementById('page').innerHTML=`<div class="card p-4 text-center"><div class="spinner-border text-primary"></div><p class="mt-2">正在预览...</p></div>`;
+document.getElementById('page').innerHTML=showLoading('正在分析数据...');
 
 let r=await api('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:S.profile,files:S.csvFiles.map(f=>f.path)})});
 S.preview=r;
 
-let html=`<div class="card p-4"><div class="d-flex justify-content-between align-items-center mb-3"><h5>🔍 预览结果</h5><span class="badge bg-info">接口: ${S.profile}</span></div>`;
+let html=`<div class="card"><div class="card-title"><span>🔍 预览结果</span><span class="badge">${S.profile}</span></div>`;
 
-if(r.error){html+=`<div class="alert alert-warning">${r.error}</div>`}
+if(r.error){html+=`<div class="empty-state text-danger">${r.error}</div>`}
 else{
-html+=`<div class="row g-3 mb-3">`;
-html+=stat('CSV 行数',r.csv_rows||0,'#6c757d');
-html+=stat('匹配记录',r.matched_records||0,'#0d6efd');
-html+=stat('待更新',r.planned_updates||0,'#ffc107');
-html+=stat('异常状态',(r.unknown_statuses?Object.keys(r.unknown_statuses).length:0)||0,'#dc3545');
+html+=`<div class="stats">`;
+html+=stat('CSV 行数',r.csv_rows||0,'#64748b');
+html+=stat('匹配记录',r.matched_records||0,'#4f46e5');
+html+=stat('待更新',r.planned_updates||0,'#f59e0b');
+html+=stat('异常状态',(r.unknown_statuses?Object.keys(r.unknown_statuses).length:0)||0,'#ef4444');
 html+=`</div>`;
 
 if(r.field_changes&&Object.keys(r.field_changes).length>0){
-html+=`<h6>字段变更统计</h6><table class="table table-sm"><thead><tr><th>字段</th><th>变更数</th></tr></thead><tbody>`;
+html+=`<div class="mb-3"><strong style="font-size:.9rem">字段变更统计</strong><div class="table-wrap"><table><thead><tr><th>字段</th><th>变更数</th></tr></thead><tbody>`;
 for(let[k,v]of Object.entries(r.field_changes))html+=`<tr><td>${k}</td><td>${v}</td></tr>`;
-html+=`</tbody></table>`;
+html+=`</tbody></table></div></div>`;
 }
 if(r.status_changes&&Object.keys(r.status_changes).length>0){
-html+=`<h6>签收状态变更</h6><table class="table table-sm"><thead><tr><th>状态</th><th>变更数</th></tr></thead><tbody>`;
+html+=`<div class="mb-3"><strong style="font-size:.9rem">签收状态变更</strong><div class="table-wrap"><table><thead><tr><th>状态</th><th>变更数</th></tr></thead><tbody>`;
 for(let[k,v]of Object.entries(r.status_changes))html+=`<tr><td>${k}</td><td>${v}</td></tr>`;
-html+=`</tbody></table>`;
+html+=`</tbody></table></div></div>`;
 }
 if(r.unknown_statuses&&Object.keys(r.unknown_statuses).length>0){
-html+=`<h6 class="text-danger">未知状态</h6><table class="table table-sm"><thead><tr><th>状态</th><th>出现次数</th></tr></thead><tbody>`;
+html+=`<div class="mb-3"><strong style="font-size:.9rem;color:var(--danger)">未知状态</strong><div class="table-wrap"><table><thead><tr><th>状态</th><th>出现次数</th></tr></thead><tbody>`;
 for(let[k,v]of Object.entries(r.unknown_statuses))html+=`<tr><td>${k}</td><td>${v}</td></tr>`;
-html+=`</tbody></table>`;
+html+=`</tbody></table></div></div>`;
 }
 
 // 详细变更列表
 if(r.preview_details&&r.preview_details.length>0){
-html+=`<h6 class="mt-3">📋 待更新记录详情 <small class="text-muted">(${r.preview_details.length} 条)</small></h6>`;
-html+=`<div style="max-height:500px;overflow-y:auto;border:1px solid #dee2e6;border-radius:8px">`;
-html+=`<table class="table table-sm table-hover mb-0"><thead style="position:sticky;top:0;background:#f8f9fa"><tr><th>订单ID</th><th>字段</th><th>旧值</th><th>→ 新值</th></tr></thead><tbody>`;
+html+=`<div class="mb-3"><div class="flex-between"><strong style="font-size:.9rem">📋 待更新记录详情</strong><span class="text-muted" style="font-size:.8rem">${r.preview_details.length} 条</span></div><div class="table-wrap" style="max-height:480px;overflow-y:auto"><table><thead><tr><th>订单ID</th><th>字段</th><th>旧值</th><th>→ 新值</th></tr></thead><tbody>`;
 for(let d of r.preview_details){
 let first=true;
 for(let[fld,chg]of Object.entries(d.changes)){
 let orderId=first?escHtml(d.order_id||d.record_id):'';
-html+=`<tr><td>${orderId}</td><td>${escHtml(fld)}</td><td style="color:#dc3545;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(chg.old)}">${escHtml(chg.old)||'<span class="text-muted">空</span>'}</td><td style="color:#198754;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(chg.new)}">${escHtml(chg.new)||'<span class="text-muted">空</span>'}</td></tr>`;
+html+=`<tr><td>${orderId}</td><td>${escHtml(fld)}</td><td class="old-val" title="${escHtml(chg.old)}">${escHtml(chg.old)||'<span class="text-muted">空</span>'}</td><td class="new-val" title="${escHtml(chg.new)}">${escHtml(chg.new)||'<span class="text-muted">空</span>'}</td></tr>`;
 first=false;
 }
 }
-html+=`</tbody></table></div>`;
+html+=`</tbody></table></div></div>`;
 }
 
-if(!r.field_changes&&!r.status_changes&&!r.unknown_statuses&&(!r.preview_details||r.preview_details.length===0))html+=`<p class="text-muted">没有需要更新的内容</p>`;
+if(!r.field_changes&&!r.status_changes&&!r.unknown_statuses&&(!r.preview_details||r.preview_details.length===0))html+=`<div class="empty-state">没有需要更新的内容</div>`;
 }
 
-html+=`<div class="d-flex gap-2 mt-3">
-<button class="btn btn-outline-secondary btn-sm" onclick="showStep2()">← 上一步</button>
+html+=`<div class="gap-2 mt-3">
+<button class="btn btn-sm" onclick="showStep2()">← 上一步</button>
 <button class="btn btn-success btn-sm ms-auto" onclick="goExecute()" ${!r.planned_updates?'disabled':''}>执行更新 →</button>
 </div></div>`;
 
 document.getElementById('page').innerHTML=html;
 }
-function stat(lbl,num,color){return `<div class="col-3"><div class="stat-card card p-2"><div class="num" style="color:${color}">${num}</div><div class="lbl">${lbl}</div></div></div>`}
+function stat(lbl,num,color){return `<div class="stat-card"><div class="stat-num" style="color:${color}">${num}</div><div class="stat-label">${lbl}</div></div>`}
 
 // ═══════════════ STEP 4: 执行 ═══════════════
 async function goExecute(){
 setStep(4);
-document.getElementById('page').innerHTML=`<div class="card p-4"><h5>⚠️ 确认执行</h5>
-<p>将更新 <strong>${S.preview.planned_updates}</strong> 条记录到飞书寄样表。</p>
-<p class="text-danger">此操作不可撤销！</p>
-<div class="mb-3"><label><input type="checkbox" id="confirmExec"> 我确认要执行更新</label></div>
-<div class="d-flex gap-2">
-<button class="btn btn-outline-secondary btn-sm" onclick="goPreview()">← 返回预览</button>
+document.getElementById('page').innerHTML=`<div class="card"><div class="card-title">⚠️ 确认执行</div>
+<p style="font-size:.9rem;margin-bottom:8px">将更新 <strong>${S.preview.planned_updates}</strong> 条记录到飞书寄样表。</p>
+<p style="font-size:.85rem;color:var(--danger);margin-bottom:16px">此操作不可撤销！</p>
+<div style="margin-bottom:16px"><label style="font-size:.88rem;display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="confirmExec"> 我确认要执行更新</label></div>
+<div class="gap-2">
+<button class="btn btn-sm" onclick="goPreview()">← 返回预览</button>
 <button class="btn btn-danger btn-sm ms-auto" id="execBtn" onclick="doExecute()" disabled>执行更新</button>
 </div>
 <div id="execResult" class="mt-3"></div></div>`;
@@ -553,15 +602,15 @@ document.getElementById('execBtn').disabled=!this.checked;
 }
 
 async function doExecute(){
-document.getElementById('execResult').innerHTML='<div class="text-center"><div class="spinner-border spinner-border-sm"></div> 正在执行...</div>';
+document.getElementById('execResult').innerHTML=showLoading('正在执行更新...');
 let r=await api('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:S.profile,files:S.csvFiles.map(f=>f.path)})});
 let html='';
-if(r.error)html=`<div class="alert alert-danger">${r.error}</div>`;
+if(r.error)html=`<div class="empty-state text-danger">${r.error}</div>`;
 else{
-html=`<div class="alert alert-success">✅ 执行完成</div>`;
-html+=`<table class="table table-sm"><tr><td>更新成功</td><td><strong>${r.updated||0}</strong></td></tr>`;
-html+=`<tr><td>错误</td><td>${(r.errors||[]).length}</td></tr></table>`;
-if(r.errors&&r.errors.length>0){html+=`<h6 class="text-danger">错误详情:</h6><pre class="small" style="max-height:200px;overflow:auto">${JSON.stringify(r.errors.slice(0,20),null,2)}</pre>`}
+html=`<div style="text-align:center;padding:16px;font-size:1.1rem;font-weight:600;color:var(--success)">✅ 执行完成</div>`;
+html+=`<div class="table-wrap"><table><tr><td>更新成功</td><td><strong>${r.updated||0}</strong></td></tr>`;
+html+=`<tr><td>错误</td><td>${(r.errors||[]).length}</td></tr></table></div>`;
+if(r.errors&&r.errors.length>0){html+=`<div class="mt-3"><strong style="font-size:.85rem;color:var(--danger)">错误详情:</strong><pre style="font-size:.8rem;max-height:180px;overflow:auto;background:#f8fafc;padding:12px;border-radius:8px;margin-top:6px">${JSON.stringify(r.errors.slice(0,20),null,2)}</pre></div>`}
 }
 document.getElementById('execResult').innerHTML=html;
 toast(r.error?'执行失败':'执行完成','success');
