@@ -450,16 +450,7 @@ function uploadFiles(input){if(input.files.length>0)doUpload(input.files)}
 
 async function doUpload(files){
 let fd=new FormData();
-let existingNames=new Set(S.csvFiles.map(f=>f.name));
-let dupes=[];
-for(let f of files){
-if(!f.name.endsWith('.csv'))continue;
-if(existingNames.has(f.name)){dupes.push(f.name);continue}
-fd.append('files',f);
-existingNames.add(f.name);
-}
-if(dupes.length>0)toast(`跳过重复文件: ${dupes.join(', ')}`,'warning');
-if([...fd.entries()].filter(e=>e[0]==='files').length===0){toast('没有新文件可上传','warning');return}
+for(let f of files){if(f.name.endsWith('.csv'))fd.append('files',f)}
 fd.append('profile',S.profile);
 let r=await api('/api/upload',{method:'POST',body:fd});
 if(r.error){toast(r.error,'danger');return}

@@ -25,7 +25,7 @@ class CsvSyncConfig:
     rules_path: Path
     timezone: str = "Asia/Shanghai"
     page_size: int = 500
-    request_interval_seconds: float = 0.02
+    request_interval_seconds: float = 0.08
 
 
 @dataclass
@@ -143,27 +143,14 @@ def build_updates(
     csv_source_fields = set(rules["update_scope"].get("csv_source_of_truth_fields", []))
     overwritable = set(rules["sign_status_update_rules"]["protect_existing_status"]["overwritable_statuses"])
     today_ms = today_midnight_ms(config.timezone)
-    # 只拉取匹配和更新需要的字段，减少传输量
-    needed_fields = list({"订单ID", "签收状态", "视频链接"} | allowed)
+    field_names = list(allowed | {"视频链接"})
     updates: list[tuple[str, dict[str, Any]]] = []
 
-    # 只拉取 CSV 中存在的订单ID，避免全表扫描
-    csv_ids = list(csv_by_order.keys())
-    # 飞书 filter 有长度限制，分批查询
-    id_batch_size = 50
-    for batch_start in range(0, len(csv_ids), id_batch_size):
-        batch_ids = csv_ids[batch_start:batch_start + id_batch_size]
-        filter_expr = "OR(" + ",".join(
-            f'CurrentValue.[订单ID]="{eid}"'
-            for eid in batch_ids
-        ) + ")"
-
-        for record in service.iter_all_records(
-            config.app_token,
-            config.table_id,
-            page_size=config.page_size,
-            field_names=needed_fields,
-            filter_=filter_expr,
+    for record in service.iter_all_records(
+        config.app_token,
+        config.table_id,
+        page_size=config.page_size,
+        field_names=field_names,
     ):
         fields = record.get("fields") or {}
         row = csv_by_order.get(normalize(fields.get("订单ID")))
